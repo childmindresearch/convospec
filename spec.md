@@ -5,9 +5,11 @@
 | Field | Value |
 |---|---|
 | Status | Draft |
-| Version | 0.2.0 |
+| Version | 0.3.0 |
 | Audience | Spec authors, runtime implementers, conversation designers |
 | Scope | Conceptual node taxonomy and graph semantics (format-agnostic) |
+
+**Revision notes (0.3.0).** Additive revision driven by the KSADS compliance evaluation ([`evaluations/ksads/ksads-compliance.md`](evaluations/ksads/ksads-compliance.md)) and the remediation proposal ([`evaluations/ksads/proposal-v0.3.0-ksads-remediation.md`](evaluations/ksads/proposal-v0.3.0-ksads-remediation.md)). Changes: new `decide` and `foreach` control nodes; `graph_registry` for bounded dynamic dispatch; session identity, links, and exports for multi-informant cases; the `session_store` data-source kind; `ask.options_ref`; principles P8 (single-exchange nodes) and P9 (session-scoped identity); validation rules VR-20–VR-25. No existing node type changed incompatibly.
 
 ## Conventions
 
@@ -45,13 +47,15 @@ This specification defines the primitive **node types** from which arbitrary con
 - Support silent background inference (e.g., risk detection) alongside user-facing turns.
 - Support reproducible randomization of branches and response variants.
 - Distinguish mutable session State, read-only inline Context, and external Data Sources, with declared, auditable access.
+- Support multi-session cases in which informant-specific sessions exchange declared, read-only data.
+- Support declarative decision logic over typed state operands and runtime-ordered dispatch of reusable subgraphs.
 
 **Non-Goals**
 
 - A concrete serialization or wire format (deferred; see §11).
 - A prompt-authoring language or model API.
 - UI/rendering details beyond input-type semantics.
-- Multi-agent orchestration outside a single conversation graph.
+- Multi-agent orchestration, or case-level orchestration of multiple sessions (spawning, ordering, retry, concurrency), outside a single conversation graph.
 - A full plugin ABI for custom nodes (stub only; see §9).
 
 ---
@@ -65,6 +69,8 @@ This specification defines the primitive **node types** from which arbitrary con
 - **P5 — Single-await.** At most one execution path MAY await end-user input at any time (§6.4).
 - **P6 — Explicit failure.** Every node that can fail or block SHOULD declare error and timeout transitions (§5).
 - **P7 — Extensible without churn.** New node types MUST be addable through a declared contract without altering existing graph structure (§9).
+- **P8 — Single-exchange nodes.** A node MUST perform at most one user exchange. Multi-exchange sub-dialogues MUST be expressed as an explicit loop of single-exchange nodes; no node type may encapsulate an unbounded internal dialogue (§6.5).
+- **P9 — Session-scoped identity, declared links.** Participant and informant identity belong to the session, not to the graph. Data crosses session boundaries only through declared, immutable, acyclic links and declared exports (§3.7).
 
 ---
 
@@ -78,6 +84,10 @@ A **session** is one execution of a graph for one participant. A session MUST ha
 |---|---|---|
 | `session_id` | string | Unique identifier for the execution. |
 | `graph_ref` | string | Graph id and version being executed. |
+| `case_id` | string | Groups sessions that concern the same participant or episode (§3.7). |
+| `role` | string | Informant or rater identity: `participant`, `caregiver`, `clinician`, or a domain label such as `child` (§3.7). |
+| `links` | map | Named, immutable references to other sessions in the same case (§3.7). |
+| `export` | object | Allowlist of state slots readable by linked sessions (§3.7). |
 | `seed` | integer | Seed governing all randomized decisions (§3.4). |
 | `state` | State | Mutable scoped variables (§3.2). |
 | `context` | Context | Read-only inline data attached to the conversation (§3.6). |
@@ -86,6 +96,8 @@ A **session** is one execution of a graph for one participant. A session MUST ha
 | `status` | enum | `active`, `completed`, `abandoned`, `escalated`, `limit_exceeded`. |
 
 A session MAY be paused and resumed. On resume, `seed`, `state`, and `context` MUST be preserved.
+
+`case_id`, `role`, `links`, and `export` are REQUIRED only for sessions participating in a multi-session case. A standalone session MAY omit them. Sessions are independent executions: one session MUST NOT await, sequence, retry, or terminate another. Case-level orchestration is out of scope (§1).
 
 ### 3.2 State
 
@@ -166,7 +178,7 @@ data_sources:
 | Field | Required | Description |
 |---|---|---|
 | `id` | yes | Namespaced identifier referenced by `fetch.source_ref`. |
-| `kind` | yes | Connector type (`postgres`, `http`, `vector`, or a namespaced custom kind). |
+| `kind` | yes | Connector type (`postgres`, `http`, `vector`, `session_store`, or a namespaced custom kind). |
 | `endpoint` | yes | Connection target (DSN/URL); MAY itself be a secret reference. |
 | `credentials_ref` | conditional | Reference to a secret in the runtime secret store; REQUIRED for authenticated sources. |
 | `attributes` | yes | Typed attribute schema exposed by the source. |
@@ -180,6 +192,7 @@ data_sources:
 - Data sources MUST be declared at graph or environment level; a session binds to them at start.
 - `read_write` sources MUST be explicitly permitted by graph policy; the default is `read_only`.
 - Data sources MUST NOT be used to write to State implicitly; only `fetch` nodes materialize attributes into State.
+- A `session_store` source resolves against the current session's declared `links` (§3.7). It MUST be `access: read_only`; `read_write` is invalid for this kind. It exposes only attributes that the linked session has exported.
 
 ### 3.6 Context (Inline Data)
 
@@ -205,6 +218,34 @@ context:
 - Every `context.*` reference MUST resolve in the supplied Context or its optional `context_schema`.
 - Context is distinct from State: State is mutable and scoped; Context is immutable and supplied.
 - Context size SHOULD be bounded by graph `limits` to avoid unbounded context-window growth.
+
+### 3.7 Session Links and Cross-Session Data
+
+A multi-session **case** groups sessions that concern the same participant or episode, typically one session per informant plus a synthesis session. Sessions exchange data only through declared links and declared exports. A graph MUST NOT address two informants within a single flow.
+
+```yaml
+session:
+  session_id: S-child-001
+  case_id: CASE-1042
+  role: child
+  links:
+    parent: S-parent-001
+  export:
+    attributes:
+      dep_mood_summary_ce: { type: integer }
+      dep_trigger: { type: boolean }
+    access: link_read
+```
+
+**Rules**
+
+- `links` MUST be declared at session start and MUST be immutable thereafter. Immutability keeps replay deterministic (§3.4) and prevents link retargeting mid-session.
+- `links` MUST be acyclic. A link to a session that does not exist is a session-start error, not a runtime edge case.
+- `export.attributes` is an **allowlist**, not a projection of all state. There is no wildcard. Anything not exported is invisible to linked sessions.
+- `export` is versioned with the session's `graph_ref`. A linked reader validates against the exporting session's recorded export schema, not the current graph's.
+- Cross-session reads MUST use a `session_store` data source (§3.5) and a `fetch` node with `session_ref` (§4.6). They MUST NOT write to the linked session, block the conversation, or create a turn boundary.
+- A session that is still `active` MAY be read. The reader MUST treat absent exports as `null` and MUST apply an explicit missing-value policy (see `decide.on_missing`, §4.4).
+- A session MUST NOT await, sequence, retry, or terminate another session (P9). Only exported data crosses the boundary.
 
 ---
 
@@ -269,6 +310,7 @@ Only one path MAY be in `user` await at a time (P5, VR-11).
 | `slot` | yes | State variable receiving the validated value. |
 | `input_type` | yes | One of the enum below. |
 | `response_schema` | conditional | Validation schema; REQUIRED for `custom`. |
+| `options_ref` | no | List-typed state reference supplying the option set at turn time; alternative to static `options`. |
 | `required` | no | Whether an empty response is acceptable (default `true`). |
 | `retries` | no | Max re-prompts on invalid input (default `0`). |
 | `timeout_s` | no | Time to wait before firing the `timeout` edge. |
@@ -288,9 +330,12 @@ Only one path MAY be in `user` await at a time (P5, VR-11).
 | `date` | date | `min`, `max` |
 | `custom` | any | `response_schema` |
 
+For `single_select` and `multi_select`, the option set MUST be supplied by exactly one of `options` (static) or `options_ref` (resolved from state). When `options_ref` is used, the response MUST validate against the resolved set.
+
 - **Effects**: writes `slot`.
 - **Await**: `user`.
 - **Requirements**:
+  - The node MUST perform exactly one user exchange (P8): one prompt and one accepted response. `retries` re-prompts the **same** prompt and does not constitute a new exchange.
   - The response MUST be validated against `input_type` and `response_schema` before writing `slot`.
   - On validation failure, the runtime MUST either re-prompt (up to `retries`) or follow the `error` edge.
   - The node MUST define a turn boundary and MUST record the raw and validated response in the transcript.
@@ -329,7 +374,7 @@ Model-backed nodes MUST declare `effects.write` and MUST record enough provenanc
 - **Effects**: writes `slot`.
 - **Await**: `user` when `mode: conversational`; `none` when `mode: silent`.
 - **Requirements**:
-  - In `conversational` mode the node MUST emit a user-facing message and await the user's reply, writing the validated reply to `slot`.
+  - In `conversational` mode the node MUST emit exactly one user-facing message and await exactly one reply (P8), writing the validated reply to `slot`. It MUST NOT conduct further exchanges internally and MUST NOT hold an internal turn budget.
   - In `silent` mode the node MUST NOT produce a user-facing turn and MUST NOT block.
   - When `output_schema` is present, output MUST validate before writing; on failure the `error` edge MUST be taken.
   - The runtime MUST record model id, prompt hash, and output for every invocation.
@@ -388,6 +433,45 @@ Model-backed nodes MUST declare `effects.write` and MUST record enough provenanc
   - Outgoing edges MUST be `conditional` and/or `default`; at least one MUST exist.
   - A `branch` MUST have a `default` edge or guards that are provably exhaustive (VR-9).
   - Exactly one outgoing edge MUST be taken per evaluation.
+
+#### `decide`
+
+- **Purpose**: Evaluate a declared logical operation over typed state operands and route on the boolean result.
+- **Ports**: `in`; `true`; `false`; `unknown`; `error`.
+- **Config**:
+
+| Field | Required | Description |
+|---|---|---|
+| `operands` | yes | `{ refs: [...] }` (explicit list) or `{ list_ref: state.x }` (list-typed variable). |
+| `test` | conditional | REQUIRED for non-boolean operands; MUST be omitted for boolean operands. |
+| `combine` | yes | `any`, `all`, `none`, or `n_of_k`. |
+| `k` | conditional | REQUIRED for `n_of_k`; MUST be a positive integer. |
+| `on_missing` | no | `unknown` (default), `skip`, or `fail`. |
+| `result_slot` | no | Receives the boolean result for audit or later reuse. |
+
+- **Operands**: `refs` entries are a state reference or `{ ref: state.x, negate: true }`; `negate` inverts that operand's test result. All operands MUST share a type, and `list_ref` MUST resolve to a `list<T>`.
+- **`test`** compares each operand to a literal, set, or range. It MUST NOT compare operands to each other; pairwise comparison belongs in a `branch` guard (§5.3).
+
+| Operand type | Legal `test` | Required parameters |
+|---|---|---|
+| `boolean` | none; use `negate` for inversion | — |
+| `integer`, `number` | `gt`, `gte`, `lt`, `lte`, `eq`, `neq` | `value` |
+| `integer`, `number` | `within` | `min`, `max` |
+| `date` | `before`, `after` | `value` |
+| `date` | `within` | `from`, `to` |
+| `enum` | `eq` | `value` |
+| `enum` | `in` | `values` |
+| `list<T>` | `predicate` using the `item.` binding (§5.3) | — |
+
+- **`combine`**: `any` is true iff at least one operand test is true; `all` iff every test is true; `none` iff no test is true; `n_of_k` iff at least `k` tests are true. For an empty operand set, `any` is `false`, `all` and `none` are `true`, and `n_of_k` is `false`.
+- **`on_missing`**: `unknown` takes the `unknown` port if any operand or element is `null`; `skip` excludes `null` operands and evaluates `combine` over the remainder; `fail` takes the `error` port. The default `unknown` exists so a missing rating is a routable outcome rather than a silent `false` (§5.3).
+- **Effects**: MAY write `result_slot`.
+- **Await**: `none`.
+- **Requirements**:
+  - Exactly one of `true`, `false`, or `unknown` MUST be taken per evaluation (VR-20).
+  - A `decide` MUST be a pure function of state: no I/O, no model calls, no Context writes.
+  - `decide` routes only on the boolean outcome. It is not a multi-way switch; routing to more than one functional target per outcome is a `branch` concern.
+  - `n_of_k` with `k` greater than the possible operand count MUST fail validation for `refs` operands; for `list_ref` it evaluates to `false`.
 
 #### `sample`
 
@@ -461,12 +545,41 @@ config:
   - On reaching `max_iterations` without `exit_when`, it MUST take `exit` (or the `error` edge if declared).
   - Every cycle in the graph MUST pass through a `loop` node or a guarded edge with a counter (VR-10).
 
+#### `foreach`
+
+- **Purpose**: Iterate an ordered, filtered collection, invoking a body once per element (e.g., runtime-ordered dispatch of reusable subgraphs).
+- **Ports**: `in`; `body` (only when `body_entry` is used); `exit`; `error`.
+- **Config**:
+
+| Field | Required | Description |
+|---|---|---|
+| `over` | yes | `{ list_ref: state.x }` (list-typed variable) or `{ registry: name }` (registry projection, §6.1). |
+| `filter` | no | Scoped expression over `item.`; elements failing it are skipped. |
+| `order_by` | no | Scoped expression over `item.`; ascending unless `descending: true`. |
+| `descending` | no | Boolean; default `false`. |
+| `tiebreak` | no | Scoped expression over `item.`; together with `order_by` MUST yield a total order. |
+| `body_graph` | conditional | Registry form resolved per element; REQUIRED if `body_entry` is absent. |
+| `body_entry` | conditional | Static node id; REQUIRED if `body_graph` is absent. |
+| `item_slot` | yes | State variable receiving the current element. |
+| `index_slot` | no | State variable receiving the zero-based iteration index. |
+| `max_iterations` | yes | Positive integer. |
+
+- **Effects**: writes `item_slot`; MAY write `index_slot`.
+- **Await**: inherited from the body (MAY be `user`).
+- **Requirements**:
+  - The iteration set MUST be snapshotted at entry; mutating the source collection inside the body MUST NOT change the set or the order of the current run (§3.4).
+  - Ordering MUST be total. If `order_by` can produce ties, `tiebreak` MUST be declared; otherwise stable input order MUST be used.
+  - `max_iterations` MUST bound the loop; on reaching it the `exit` edge MUST be taken (or `error` if declared).
+  - An empty iteration set MUST take `exit` immediately.
+  - When `body_graph` is used the `body` port MUST have no edges; when `body_entry` is used the invoked node MUST be reachable only from the `body` port.
+  - A `foreach` whose body can await `user` MUST NOT appear in a forked silent stream (VR-11).
+
 #### `call`
 
 - **Purpose**: Invoke a subgraph as a reusable unit (e.g., a shared consent flow).
 - **Ports**: `in`; `out`; `error`.
 - **Config**:
-  - `graph_ref` (REQUIRED): subgraph id and version.
+  - `graph_ref` (REQUIRED): subgraph id and version, or a registry reference `{ registry: name, key: <scoped expression> }` (§6.1).
   - `state_isolation` (REQUIRED): `isolated` or `shared`.
   - `input_map` (OPTIONAL): parent state → child inputs.
   - `output_map` (OPTIONAL): child outputs → parent state.
@@ -474,6 +587,7 @@ config:
 - **Await**: inherited from the subgraph (MAY be `user`).
 - **Requirements**:
   - The referenced subgraph MUST exist and be version-pinned (VR-13).
+  - A registry-based `graph_ref` MUST resolve to a key in the named registry; resolution failure MUST take the `error` edge.
   - In `isolated` mode the child MUST NOT read or write parent state except through `input_map`/`output_map`.
   - Subgraph errors MUST propagate to the caller's `error` edge.
   - A `call` that can await `user` MUST NOT be placed in a forked silent stream.
@@ -504,6 +618,7 @@ config:
 | Field | Required | Description |
 |---|---|---|
 | `source_ref` | yes | Data source id (§3.5). |
+| `session_ref` | conditional | REQUIRED when `source_ref` is a `session_store`; MUST name a key in the current session's `links` (§3.7). |
 | `attributes` | yes | Attributes to retrieve; MUST exist in the source schema. |
 | `filters` | no | Parameterized filters; MAY reference `state.*`/`context.*`. |
 | `output_map` | yes | Map of source attribute → state slot. |
@@ -518,6 +633,7 @@ config:
   - Credentials MUST be resolved by the runtime secret store and MUST NOT appear in config or traces (VR-19).
   - A `fetch` MUST NOT write to Context, which is read-only (VR-18).
   - Failures and timeouts MUST route to `error`/`timeout`, not terminate the session.
+  - A `fetch` against a `session_store` MUST name a declared link and MUST request only attributes exported by that linked session (VR-21). It MUST NOT write to the linked session.
 
 #### `tool`
 
@@ -565,6 +681,7 @@ An edge is a directed transition:
   from: q2
   to: q3
   type: conditional      # next | conditional | default | error | timeout
+  port: out              # source port; default `out` when the node has one
   when: "state.age >= 18"
   priority: 10           # lower number = higher precedence
 ```
@@ -581,7 +698,8 @@ An edge is a directed transition:
 
 - A node with a single outbound port MUST use `next` (or a single `conditional` on control nodes).
 - `sample` nodes declare outbound transitions via `config.choices`; no edge objects are required for them.
-- Multi-port control nodes (`loop`) MUST specify the source port (`body` or `exit`) on each edge.
+- Multi-port control nodes (`loop`, `foreach`, `decide`) MUST specify the source `port` on each edge. `decide` ports are `true`, `false`, and `unknown`.
+- For `loop`, the `body` edge target MUST equal `body_entry`.
 - Edges MUST connect an existing outbound port to an existing node (VR-4, VR-14).
 - Edges MUST NOT carry weight attributes; weights belong to `sample` config (§4.4).
 
@@ -595,6 +713,8 @@ When multiple outbound edges could fire, the runtime MUST resolve in this order:
 4. `default`.
 
 Exactly one edge MUST be taken. If none applies and no `default` exists, the graph MUST fail validation (VR-9).
+
+**Port-scoped resolution.** A multi-port node first selects its active port — `decide` by outcome, `loop`/`foreach` by `body` or `exit` — then resolves edges within that port using the order above. If the active port has no edge, the runtime MUST take `error` if present, otherwise the graph's `on_error`; a port that can be active with no edge and no fallback MUST fail validation.
 
 ### 5.3 Guard and Expression Grammar
 
@@ -618,8 +738,11 @@ factor       = number | string | boolean | "null"
              | "(" , arith , ")" ;
 ref          = "state." , identifier , { "." , identifier }
              | "context." , identifier , { "." , identifier } ;
+local_ref    = "item" , { "." , identifier } ;
 predicate_call = identifier , "(" , [ operand , { "," , operand } ] , ")" ;
 ```
+
+`local_ref` is legal **only** inside node-scoped expression fields: `decide.test.predicate`, `foreach.filter`, `foreach.order_by`, `foreach.tiebreak`, and `foreach.body_graph`. In those contexts `item` binds the current element and its type is derived from the node's `over` operand. `item` MUST NOT appear in edge guards, `set` expressions, or `loop.exit_when`, which have no iteration binding.
 
 **Named predicates** are resolved from a graph-level `predicates` registry. A predicate MUST be declared before use; undeclared predicates MUST fail validation.
 
@@ -655,6 +778,7 @@ graph:
   context_schema: { ... }
   context: { ... }
   predicates: { ... }
+  graph_registry: { ... }
   limits:
     max_turns: 50
     max_wall_clock_s: 1800
@@ -675,6 +799,7 @@ graph:
 | `context_schema` | no | Optional typing for inline Context (§3.6). |
 | `context` | no | Graph-default inline Context data (§3.6). |
 | `predicates` | no | Named predicate registry (§5.3). |
+| `graph_registry` | no | Named, version-pinned subgraph registries for dynamic dispatch (§6.2). |
 | `limits` | no | Turn/time/token budgets (§7.4). |
 | `seed` | no | Default session seed (§3.4). |
 | `entry` | yes | MUST reference the single `start` node. |
@@ -685,6 +810,23 @@ graph:
 ### 6.2 Subgraphs
 
 A `call` node composes graphs. The subgraph MUST expose declared inputs/outputs, and the caller MUST map them via `input_map`/`output_map`. Subgraph state is isolated unless `state_isolation: shared`. Subgraphs MUST be version-pinned so graphs remain reproducible.
+
+**Dynamic dispatch.** A `call.graph_ref` MAY be selected at runtime, but only through a declared `graph_registry`. Dynamic references resolve **only** through a registry; there is no runtime graph lookup by id. This keeps every possible dispatch target enumerable from the graph source (P4) and version-pinned (VR-13, VR-22).
+
+```yaml
+graph_registry:
+  supplements:
+    dep:
+      graph_ref: ksads_dep_supplement
+      version: 0.1.0
+      attributes: { required: true, onset_age: 9 }
+    gad:
+      graph_ref: ksads_gad_supplement
+      version: 0.1.0
+      attributes: { required: false, onset_age: 7 }
+```
+
+A registry entry has `graph_ref`, `version`, and optional static `attributes`. Attributes are graph metadata, not state; `foreach` uses them for `filter`/`order_by`. A registry projection binds each element as `{ key, graph_ref, version, <attribute>... }`, so `item.key` and `item.onset_age` are valid element-scoped references. Resolution failure at runtime (key not present) takes the `error` edge; it is not a validation failure because the key is state-derived.
 
 ### 6.3 Branching vs. Forking
 
@@ -702,6 +844,57 @@ Consequences:
 - A `call` that can await `user` MUST NOT appear inside a forked stream.
 - The runtime MUST reject any graph violating this invariant (VR-11).
 
+### 6.5 Canonical Patterns
+
+These patterns are normative compositions, not node types. They exist because the node taxonomy deliberately provides no compound dialogue node (P8).
+
+#### 6.5.1 Bounded probe loop
+
+A semi-structured probe is a sequence of single-exchange turns whose termination is a judgment. It MUST be authored as a `loop` of single-exchange nodes:
+
+```yaml
+- id: probe_loop
+  type: loop
+  config:
+    body_entry: probe_turn
+    exit_when: "state.probe_status == 'complete' or state.probe_status == 'declined'"
+    max_iterations: 5
+    counter_slot: probe_turn_count
+- id: probe_turn
+  type: llm
+  config:
+    model: m1
+    mode: conversational
+    prompt_template: "Ask one question about {{ state.current_item }}, using this probe bank: {{ state.probe_bank }}."
+    slot: probe_reply
+- id: probe_assess
+  type: classify
+  config:
+    backend: llm
+    model: m1
+    inputs: [state.probe_reply]
+    labels: [need_more, complete, declined]
+    slot: probe_status
+```
+
+**Rules**
+
+- The exit flag MUST be written by a declared silent node (`classify`, `llm` in `silent` mode, or `analyze`) with recorded provenance (§4.3).
+- A loop whose exit depends on a model-written flag MUST declare `max_iterations` (VR-24). The flag is a judgment, not a guarantee.
+- Each probe turn is a separate turn (§3.3): separately validated, separately transcribed, and separately subject to `limits`.
+- Probe banks and item text MUST come from state or `call` subgraphs, not hard-coded in the loop body, when the graph is reused across items.
+
+#### 6.5.2 Any-order navigation
+
+Interviewer-driven navigation with completion tracking composes from existing nodes:
+
+1. `ask` (`single_select`) presents the outstanding sections, using `options_ref` bound to a list-typed state variable (§4.2).
+2. `call` invokes the chosen section.
+3. `set` records the section as complete in a list-typed state variable.
+4. `loop.exit_when` uses a `decide` (`combine: all`) over that variable to terminate (§4.4).
+
+No worklist node is required: the sequencing policy is authorial, not structural.
+
 ---
 
 ## 7. Execution Semantics
@@ -718,7 +911,7 @@ Consequences:
 
 - A `say` or `llm` in `silent` mode MUST NOT suspend.
 - An `analyze` MUST NOT suspend; it writes a result or `default`.
-- Only `ask`, `llm` (`conversational`), `handoff`, and `call` (inherited) MAY suspend.
+- Only `ask`, `llm` (`conversational`), `handoff`, and nodes that inherit await from a body or subgraph (`loop`, `foreach`, `call`) MAY suspend.
 
 ### 7.3 Timeouts and Failure Resolution
 
@@ -742,23 +935,29 @@ A graph MUST pass all rules below before execution. Rules are numbered for refer
 
 - **VR-1** — Node ids MUST be unique within a graph.
 - **VR-2** — Exactly one `start` node MUST exist; it MUST have no inbound edges.
-- **VR-3** — Every non-`end` node MUST have at least one outbound transition (an edge, or a `sample` choice); every `end` node MUST have none.
+- **VR-3** — Every non-`end` node MUST have at least one outbound transition (an edge, a `sample` choice, or a `decide` outcome); every `end` node MUST have none. Every `foreach` MUST declare an `exit` transition.
 - **VR-4** — Every edge endpoint MUST reference an existing node and an existing port on that node.
 - **VR-5** — Every node MUST be reachable from `start`.
 - **VR-6** — Every node MUST be able to reach at least one `end` node.
 - **VR-7** — Every state reference MUST resolve in `state_schema`; every write MUST be declared in `effects.write`.
-- **VR-8** — Every `ask` MUST declare a valid `input_type`, a `slot`, and a `response_schema` when `input_type: custom`.
+- **VR-8** — Every `ask` MUST declare a valid `input_type`, a `slot`, and a `response_schema` when `input_type: custom`. For `single_select` and `multi_select`, exactly one of `options` or `options_ref` MUST be declared, and `options_ref` MUST resolve to a list-typed state variable whose element type matches the input type.
 - **VR-9** — Every `branch` MUST have a `default` edge or provably exhaustive guards.
 - **VR-10** — Unguarded cycles are forbidden; every cycle MUST pass through a `loop` node or a terminating guarded edge.
-- **VR-11** — `fork`/`join` MUST be balanced; forked streams MUST be entirely non-blocking; the graph MUST satisfy the single-await invariant (§6.4).
+- **VR-11** — `fork`/`join` MUST be balanced; forked streams MUST be entirely non-blocking; the graph MUST satisfy the single-await invariant (§6.4). A `foreach` whose body can await `user` MUST NOT appear in a forked stream.
 - **VR-12** — Every `sample` choice target MUST exist; weights MUST be positive; `record_slot` MUST be declared.
-- **VR-13** — Every `call.graph_ref` MUST exist and be version-pinned.
-- **VR-14** — Edge `type` MUST be valid for the source port (e.g., `conditional`/`default` only from control nodes).
+- **VR-13** — Every `call.graph_ref` MUST exist and be version-pinned. A registry-based `graph_ref` MUST name a declared registry whose every entry is version-pinned.
+- **VR-14** — Edge `type` MUST be valid for the source port (e.g., `conditional`/`default` only from control nodes; `conditional`/`default` MUST NOT originate from `decide` outcome ports or a `sample` node).
 - **VR-15** — Every `end` node MUST declare a valid `outcome`.
 - **VR-16** — Every node that can fail or block SHOULD declare `error`/`timeout` edges; if absent, `on_error` MUST be defined.
 - **VR-17** — Every `fetch.source_ref` MUST reference a declared data source, and every requested attribute MUST exist in that source's schema.
 - **VR-18** — Context (`context.*`) is read-only: no node or `set` MAY write it, and every `context.*` reference MUST resolve in the supplied Context or `context_schema`.
 - **VR-19** — Credentials MUST be referenced via `credentials_ref`; inline secrets in graph, config, or context are forbidden.
+- **VR-20** — Every `decide` operand MUST resolve in `state_schema`; all operands MUST share a type; `test.cmp` MUST be legal for the operand type and MUST carry the parameters that `cmp` requires; `n_of_k` MUST declare a positive `k`; exactly one of `true`/`false`/`unknown` MUST be taken per evaluation.
+- **VR-21** — Every cross-session read MUST name a declared `session.links` entry; the source MUST be a `session_store` with `access: read_only`; every requested attribute MUST be exported by the linked session.
+- **VR-22** — Every dynamic `graph_ref` MUST resolve through a declared `graph_registry`; every registry entry MUST be version-pinned; no other dynamic subgraph resolution is permitted.
+- **VR-23** — Every `foreach` MUST iterate a declared list-typed variable or a registry projection; `filter`/`order_by`/`tiebreak`/`body_graph` expressions MUST type-check against the element type; `max_iterations` MUST be declared; ordering MUST be total.
+- **VR-24** — No node may perform more than one user exchange (P8); any `loop` whose `exit_when` references a model-written variable MUST declare `max_iterations`.
+- **VR-25** — Sessions in a case MUST declare `case_id` and `role`; `links` MUST be acyclic; `export.attributes` MUST be typed.
 
 ---
 
@@ -897,7 +1096,7 @@ graph:
   state_schema:
     complaint: { type: string, scope: session, mutable: true }
     priority:  { type: string, scope: session, mutable: true }
-    confidence:{ type: number, scope: session, mutable: true }
+    confidence: { type: number, scope: session, mutable: true }
   nodes:
     - { id: start, type: start }
     - { id: q, type: ask, config: { prompt: "Describe your issue.", input_type: text, slot: complaint, response_schema: { max_length: 2000 } } }
@@ -958,6 +1157,171 @@ graph:
 
 Validation: passes VR-1…VR-19. `fetch` reads `crm` into `state.account_tier`; `greet` reads both immutable `context.*` and mutable `state.*`. Credentials are a `credentials_ref`, never inline (VR-19).
 
+### 10.5 Multi-Informant Synthesis Across Linked Sessions
+
+Demonstrates a synthesis session reading exported ratings from two informant sessions through a `session_store`, then resolving disagreement with a clinician `ask`. The parent and child sessions are separate executions of their own graph; no single flow addresses both informants.
+
+```yaml
+graph:
+  id: ksads_synthesis
+  version: 0.1.0
+  entry: start
+  data_sources:
+    linked_sessions:
+      kind: session_store
+      attributes:
+        dep_mood_summary_ce: { type: integer }
+      access: read_only
+  state_schema:
+    parent_dep_mood_ce:  { type: integer, scope: session, mutable: true }
+    child_dep_mood_ce:   { type: integer, scope: session, mutable: true }
+    dep_mood_summary_ce: { type: integer, scope: session, mutable: true }
+  nodes:
+    - { id: start, type: start }
+    - id: get_parent
+      type: fetch
+      config:
+        source_ref: linked_sessions
+        session_ref: parent
+        attributes: [dep_mood_summary_ce]
+        output_map: { dep_mood_summary_ce: parent_dep_mood_ce }
+    - id: get_child
+      type: fetch
+      config:
+        source_ref: linked_sessions
+        session_ref: child
+        attributes: [dep_mood_summary_ce]
+        output_map: { dep_mood_summary_ce: child_dep_mood_ce }
+    - { id: b_disagree, type: branch }
+    - { id: reconcile, type: ask, config: { prompt: "Parent rated {{ state.parent_dep_mood_ce }}, child rated {{ state.child_dep_mood_ce }}. Assign the summary rating.", input_type: scale, slot: dep_mood_summary_ce, response_schema: { min: 0, max: 3 } } }
+    - { id: done, type: end, config: { outcome: completed } }
+  edges:
+    - { from: start,      to: get_parent, type: next }
+    - { from: get_parent, to: get_child,  type: next }
+    - { from: get_child,  to: b_disagree, type: next }
+    - { from: b_disagree, to: reconcile,  type: conditional, when: "state.parent_dep_mood_ce != state.child_dep_mood_ce", priority: 1 }
+    - { from: b_disagree, to: done,       type: default }
+    - { from: reconcile,  to: done,       type: next }
+```
+
+Validation: passes VR-1…VR-25. The session declares `links: {parent: …, child: …}` and both linked sessions export `dep_mood_summary_ce` (VR-21). Pairwise disagreement is a `branch` guard; `decide` compares operands to literals, never to each other.
+
+### 10.6 Typed Decision and Onset-Ordered Dispatch
+
+Demonstrates a `decide` score-gated trigger replacing an enumerated guard, followed by a `foreach` that dispatches reusable supplement subgraphs in onset order.
+
+```yaml
+graph:
+  id: ksads_supplement_dispatch
+  version: 0.1.0
+  seed: 11
+  entry: start
+  graph_registry:
+    supplements:
+      dep:
+        graph_ref: ksads_dep_supplement
+        version: 0.1.0
+        attributes: { required: true, onset_age: 9 }
+      ptsd:
+        graph_ref: ksads_ptsd_supplement
+        version: 0.1.0
+        attributes: { required: false, onset_age: 11 }
+  state_schema:
+    dep_mood_ce:        { type: integer, scope: session, mutable: true }
+    dep_irrit_ce:       { type: integer, scope: session, mutable: true }
+    dep_trigger:        { type: boolean, scope: session, mutable: true }
+    current_supplement: { type: object,  scope: session, mutable: true }
+    supplement_index:   { type: integer, scope: session, mutable: true }
+  nodes:
+    - { id: start, type: start }
+    - { id: q_mood,  type: ask, config: { prompt: "Depressed mood (current).", input_type: scale, slot: dep_mood_ce,  response_schema: { min: 0, max: 3 } } }
+    - { id: q_irrit, type: ask, config: { prompt: "Irritability (current).",  input_type: scale, slot: dep_irrit_ce, response_schema: { min: 0, max: 3 } } }
+    - id: dep_trigger_check
+      type: decide
+      config:
+        operands: { refs: [state.dep_mood_ce, state.dep_irrit_ce] }
+        test: { cmp: gte, value: 3 }
+        combine: any
+        on_missing: unknown
+        result_slot: dep_trigger
+    - id: run_supplements
+      type: foreach
+      config:
+        over: { registry: supplements }
+        filter: "item.required == true"
+        order_by: "item.onset_age"
+        tiebreak: "item.key"
+        body_graph: { registry: supplements, key: "item.key" }
+        item_slot: current_supplement
+        index_slot: supplement_index
+        max_iterations: 5
+    - { id: done,       type: end, config: { outcome: completed } }
+    - { id: incomplete, type: end, config: { outcome: completed, reason: "trigger unknown; flagged for review" } }
+  edges:
+    - { from: start,             to: q_mood,           type: next }
+    - { from: q_mood,            to: q_irrit,          type: next }
+    - { from: q_irrit,           to: dep_trigger_check, type: next }
+    - { from: dep_trigger_check, port: true,    to: run_supplements, type: next }
+    - { from: dep_trigger_check, port: false,   to: done,            type: next }
+    - { from: dep_trigger_check, port: unknown, to: incomplete,      type: next }
+    - { from: run_supplements,   port: exit,    to: done,            type: next }
+```
+
+Validation: passes VR-1…VR-25. `dep_trigger_check` is a pure `decide` (VR-20) whose `unknown` port routes missing ratings rather than scoring them as absent. `run_supplements` iterates a registry projection with a total order (VR-23); its `body` port is unused because `body_graph` supplies the body. Dispatch targets are enumerable from the registry (VR-22).
+
+### 10.7 Bounded Probe Loop
+
+Demonstrates P8: a multi-exchange probe authored as single-exchange nodes inside a bounded `loop`, with a model-judged exit flag.
+
+```yaml
+graph:
+  id: ksads_probe_item
+  version: 0.1.0
+  entry: start
+  state_schema:
+    current_item:     { type: string,  scope: session, mutable: true }
+    probe_bank:       { type: string,  scope: session, mutable: true }
+    probe_reply:      { type: string,  scope: session, mutable: true }
+    probe_status:     { type: enum, values: [need_more, complete, declined], scope: session, mutable: true }
+    probe_turn_count: { type: integer, scope: session, mutable: true }
+    item_rating:      { type: integer, scope: session, mutable: true }
+  nodes:
+    - { id: start, type: start }
+    - id: probe_loop
+      type: loop
+      config:
+        body_entry: probe_turn
+        exit_when: "state.probe_status == 'complete' or state.probe_status == 'declined'"
+        max_iterations: 5
+        counter_slot: probe_turn_count
+    - id: probe_turn
+      type: llm
+      config:
+        model: m1
+        mode: conversational
+        prompt_template: "Ask one question about {{ state.current_item }}, using this probe bank: {{ state.probe_bank }}."
+        slot: probe_reply
+    - id: probe_assess
+      type: classify
+      config:
+        backend: llm
+        model: m1
+        inputs: [state.probe_reply]
+        labels: [need_more, complete, declined]
+        slot: probe_status
+    - { id: rate_item, type: ask, config: { prompt: "Assign the item rating.", input_type: scale, slot: item_rating, response_schema: { min: 0, max: 3 } } }
+    - { id: done, type: end, config: { outcome: completed } }
+  edges:
+    - { from: start,      to: probe_loop,  type: next }
+    - { from: probe_loop, port: body, to: probe_turn, type: next }
+    - { from: probe_turn, to: probe_assess, type: next }
+    - { from: probe_assess, to: probe_loop, type: next }
+    - { from: probe_loop, port: exit, to: rate_item, type: next }
+    - { from: rate_item,  to: done,        type: next }
+```
+
+Validation: passes VR-1…VR-25. The cycle passes through a `loop` (VR-10); the exit depends on a model-written flag, so `max_iterations` is REQUIRED (VR-24). Each probe turn is a distinct turn (§3.3), separately transcribed and budgeted.
+
 ---
 
 ## 11. Open Issues
@@ -974,3 +1338,10 @@ Validation: passes VR-1…VR-19. `fetch` reads `crm` into `state.account_tier`; 
 - **Privacy and retention**: state/context encryption, PII handling, and transcript retention policy.
 - **Versioning and migration**: graph migration, session compatibility across graph versions, and replay guarantees.
 - **Testing harness**: conformance suite, deterministic replay tooling, and simulation of user inputs.
+- **Decision-node consolidation**: whether `decide` should absorb `branch` into a single decision primitive with an optional `operands` block, or remain complementary.
+- **Missing-value sentinels**: whether state variables should declare sentinel values (e.g. `0` meaning "no information") so `on_missing` can detect them without repeating node-level policy.
+- **Collection construction**: `set` has no append/collect operators; worklists currently rely on registry projections and list-typed state supplied at session start.
+- **Session stores**: retention, redaction, snapshot-vs-live reads of an active linked session, and whether exports are frozen at session end. Replay requires the observed snapshot to be recorded.
+- **Nested iteration**: whether 2-D grids (e.g. relatives × conditions) should use nested `foreach` or require a `call` per dimension.
+- **Session role typing**: whether `session.role` should be a closed enum or remain a namespaced string.
+- **Turn audit fields**: whether turn records should carry session role or responder identity.

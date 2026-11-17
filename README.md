@@ -14,7 +14,7 @@ The specification is developed **against real instruments**, not in the abstract
 | Node types | 19 (`start`, `end`, `ask`, `say`, `llm`, `analyze`, `classify`, `branch`, `decide`, `sample`, `fork`, `join`, `loop`, `foreach`, `call`, `set`, `fetch`, `tool`, `handoff`) |
 | Validation rules | VR-1 … VR-37 |
 | Instruments assessed | 4 (KSADS, DASH, MoBI, Walrus) |
-| Current verdict | All four instruments fully encodable after remediation; three rated **Sufficient**, KSADS with two ergonomic partials |
+| Current verdict | All four instruments fully encodable at v0.6.0 and rated **Sufficient**. KSADS and DASH each carry one 2-D-grid partial retained by design (P14 / P12), not by missing capability |
 
 Revisions are **additive by default**: no existing node or rule changes meaning unless a revision note says so. The one documented exception is v0.6.0's history-rendering order (see the version table). Open questions are tracked in [`spec.md` §11](spec.md#11-open-issues).
 
@@ -39,14 +39,14 @@ Assessed in this order; each one drove the next spec version.
 
 | # | Instrument | Kind | Assessed at | Revised to | Final result |
 |---|---|---|---|---|---|
-| 1 | K-SADS-PL DSM-5 | Clinician diagnostic interview | v0.2.0 | v0.3.0 | Covered 18 · Partial 2 · Gap 0 — **Partially sufficient → remediated** |
+| 1 | K-SADS-PL DSM-5 | Clinician diagnostic interview | v0.2.0 | v0.3.0 | Covered 19 · Partial 1 · Gap 0 — **Partially sufficient → remediated → Sufficient** (v0.6.0 re-score) |
 | 2 | DASH Adult | Single-informant structured interview | v0.3.0 | v0.4.0 | Covered 23 · Partial 1 · Gap 0 — **Sufficient** |
 | 3 | MoBI×MSM chat trial | LLM-mediated structured experiment | v0.4.0 | v0.5.0 | Covered 24 · Partial 0 · Gap 0 — **Sufficient** |
 | 4 | Walrus open conversation | Open-ended chat with phrase/turn terminators | v0.5.0 | v0.6.0 | Covered 14 · Partial 0 · Gap 0 — **Sufficient** |
 
 ### 1. K-SADS-PL DSM-5
 
-The hardest instrument and the one that shaped the core. A multi-informant diagnostic interview (parent / child / summary), with per-disorder skip-outs, dynamic supplement dispatch, cross-item triggers, and adaptive probing. Drove the multi-session **case** model, typed `decide` routing, `graph_registry` dynamic dispatch, and bounded probe loops. Baseline was **partially sufficient**; remediated in v0.3.0.
+The hardest instrument and the one that shaped the core. A multi-informant diagnostic interview (parent / child / summary), with per-disorder skip-outs, dynamic supplement dispatch, cross-item triggers, and adaptive probing. Drove the multi-session **case** model, typed `decide` routing, `graph_registry` dynamic dispatch, and bounded probe loops. Baseline was **partially sufficient**; remediated in v0.3.0 and re-scored to **Sufficient** at v0.6.0, with one 2-D-grid partial (P14) retained by design.
 
 [inventory](evaluations/ksads/ksads-interaction-inventory.md) · [compliance](evaluations/ksads/ksads-compliance.md) · [proposal](evaluations/ksads/proposal-v0.3.0-ksads-remediation.md)
 
@@ -113,4 +113,4 @@ Every `evaluations/<instrument>/` directory contains:
 
 ## Next steps
 
-The evaluated instruments are all sufficient at v0.6.0. Outstanding design questions — serialization, custom-node ABI, multi-await forks, string folding, and the rest — are recorded in [`spec.md` §11](spec.md#11-open-issues). New instruments should follow the same inventory → compliance → proposal → revision loop.
+The evaluated instruments are all sufficient at v0.6.0. KSADS was re-scored from *partially sufficient* to *sufficient* after the v0.4.0–v0.6.0 revisions ([§9](evaluations/ksads/ksads-compliance.md#9-post-integration-re-evaluation-v060)); its one remaining partial (P14, family-history grid) is retained by design, as is DASH's P12. Outstanding design questions — serialization, custom-node ABI, multi-await forks, string folding, and the rest — are recorded in [`spec.md` §11](spec.md#11-open-issues). New instruments should follow the same inventory → compliance → proposal → revision loop.

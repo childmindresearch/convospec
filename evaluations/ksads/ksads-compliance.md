@@ -6,6 +6,8 @@
 
 **Remediation status**: the gaps identified here were addressed in `spec.md` v0.3.0 through [`proposal-v0.3.0-ksads-remediation.md`](./proposal-v0.3.0-ksads-remediation.md). Per-gap disposition is recorded in [§8](#8-remediation-status-v030). Everything above §8 remains the **v0.2.0 baseline assessment** and is preserved for traceability.
 
+**Re-evaluation (v0.6.0)**: re-scored against `spec.md` v0.6.0 in [§9](#9-post-integration-re-evaluation-v060). Corrected tally **Covered 19 · Partial 1 · Gap 0** — the sole remaining partial (P14) is retained by design, on the same footing as DASH P12. Verdict: **Sufficient**.
+
 ---
 
 ## Verdict
@@ -275,13 +277,65 @@ The four capability gaps (G1–G4) and the two weaker gaps (G5, G6) were address
 | P16 Substance list | Partial | Covered | `foreach` + `decide` |
 | P20 Longitudinal | Partial | Covered | `links.prior` + `fetch` + `set` deltas |
 
-All other patterns (P02, P04, P06, P07, P11, P12, P14, P17, P18, P19) keep their v0.2.0 verdict. Totals: **Covered 18 · Partial 2 · Gap 0**. The two remaining partials are ergonomic rather than capability gaps:
+All other patterns (P02, P04, P06, P07, P11, P12, P14, P17, P18, P19) keep their v0.2.0 verdict. Totals: **Covered 19 · Partial 1 · Gap 0**. *(Corrected: an earlier revision of this section reported "Covered 18 · Partial 2" and named P04 as a remaining partial. P04 has been Covered since v0.2.0 — see [§9](#9-post-integration-re-evaluation-v060).)* The one remaining partial is ergonomic rather than a capability gap:
 
-- **P04 Dual timeframe** — two state slots per item still works; a first-class paired-rating construct is deferred (spec §11, collection construction / nested iteration).
-- **P14 Family-history grid** — nested `foreach` is plausible but unvalidated; 2-D grid ergonomics are deferred (spec §11, nested iteration).
+- **P14 Family-history grid** — nested `foreach` is plausible but unvalidated; 2-D grid ergonomics are deferred (spec §11, nested iteration). Superseded at v0.6.0 by §6.5.4 — see [§9](#9-post-integration-re-evaluation-v060).
 
 ### 8.2 Residual concerns carried into spec §11
 
 - Sentinel handling: KSADS `0 = No information` is now routable via `decide.on_missing`, but per-variable sentinel declarations remain an open issue.
 - Replay soundness of `session_store` reads of still-active sessions requires recording the observed snapshot.
 - Whether `decide` should absorb `branch` into a single decision primitive.
+
+---
+
+## 9. Post-integration re-evaluation (v0.6.0)
+
+The v0.3.0 remediation was re-checked against `spec.md` **v0.6.0** (which since v0.4.0 has included the typed expression library, derived `views`, and the flat-iteration pattern §6.5.4). Two findings: one bookkeeping error and one superseded rationale.
+
+| Pattern | v0.3.0 | v0.6.0 | Basis |
+|---|---|---|---|
+| P04 Dual timeframe | Covered | Covered | Covered since v0.2.0 (two `ask` slots per item). v0.4.0 `views` + object constructors can project the paired `{ce, msp}` rating more cleanly (§3.8, §5.5), but the respondent-facing capture is unchanged. The §8.1 "two remaining partials" list was a miscount — P04 was never Partial. |
+| P14 Family-history grid | Partial | Partial *(by design)* | §6.5.4 (v0.4.0) now states the normative 2-D pattern: an outer `foreach` over relatives plus an inner `call`/unroll over the fixed condition list; nested `foreach` is forbidden (VR-32). Fully encodable — retained as Partial by review decision **D2 ("logic stays flat")**, identical to DASH P12. |
+| All other patterns | Covered | Covered | Additive v0.4.0–v0.6.0 changes; no construct changed meaning. |
+
+**Covered: 19 · Partial: 1 · Gap: 0.** Verdict moves from *Partially sufficient* to **Sufficient** — the same footing as DASH, which carries the identical by-design 2-D-grid partial (P12). The capability gaps G1–G4 that produced the original "partially sufficient" verdict were closed in v0.3.0; nothing outstanding is a capability gap.
+
+### 9.1 P14 encodes at v0.6.0 — family-history grid
+
+The family-history grid is relatives × conditions. The inner condition list is fixed at authoring time, so the outer `foreach` plus an inner `call`/unroll is the normative shape (§6.5.4); no runtime iteration product arises, and VR-32 holds.
+
+```yaml
+graph:
+  id: ksads_family_history
+  version: 0.1.0
+  entry: start
+  graph_registry:                       # fixed, enumerable registry (VR-22)
+    relatives:
+      mother:  { graph_ref: relative_row, version: 0.1.0 }
+      father:  { graph_ref: relative_row, version: 0.1.0 }
+      sibling: { graph_ref: relative_row, version: 0.1.0 }
+  state_schema:
+    relative_options:   { type: list<string>, scope: session, mutable: true }
+    relatives_to_score: { type: list<string>, scope: session, mutable: true }
+  nodes:
+    - { id: start, type: start }
+    - { id: pick_relatives, type: ask, config: { prompt: "Which biological relatives should be scored?", input_type: multi_select, slot: relatives_to_score, options_ref: state.relative_options } }
+    - id: per_relative
+      type: foreach
+      config:
+        over: { list_ref: state.relatives_to_score }
+        body_graph: { registry: relatives, key: "item" }
+        item_slot: current_relative
+        max_iterations: 12
+```
+
+`relative_row` is a subgraph that unrolls the fixed condition list — one `ask` (`scale`, 0–3) per condition, each writing `family_history[current_relative][condition]`. The inner dimension is a sequence of nodes, not a nested `foreach`, so the graph stays flat.
+
+Caveats, none affecting the verdict:
+
+- **Sentinel `0 = No information`** in family-history scores routes through `decide.on_missing` ([§8.2](#82-residual-concerns-carried-into-spec-11)); per-variable sentinel declarations remain a `spec.md` §11 open issue.
+- **P14 is Partial by design, not by capability.** A first-class nested iterator is deliberately excluded (VR-32) to keep the graph flat and every iteration bound statically visible (§6.5.4). DASH P12 made the same call (D2). If that design decision is ever revisited, P14 becomes Covered with no other change.
+- **P04's paired projection** benefits from v0.4.0 (`views` can expose `{ce, msp}` as one object for downstream scoring), but capture stays two `ask` nodes. Verdict unchanged.
+
+Requirements traceability moved as follows: P14 → §4.4 (`foreach`, `call`), §6.5.4 (2-D pattern, no new primitive), VR-32; P04 → §3.8 `views`, §5.5 constructors (projection only).

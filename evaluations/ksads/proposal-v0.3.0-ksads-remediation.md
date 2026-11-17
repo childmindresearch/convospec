@@ -665,7 +665,7 @@ Verdicts after proposal. "Pattern" refers to the inventory IDs.
 | P19 Informant adaptation | Covered | Covered | `branch` on age; `session.role` makes informant explicit |
 | P20 Longitudinal | Partial | Covered | `links.prior` + `fetch` + `set` deltas (this §3.4) |
 
-Totals: **Covered 18 · Partial 2 · Gap 0**. The two remaining partials are ergonomic, not capability, gaps.
+Totals: **Covered 19 · Partial 1 · Gap 0**. The one remaining partial is ergonomic, not a capability, gap. *(Corrected: this traceability table originally stated "Covered 18 · Partial 2" and counted P04 among the partials, though the table itself lists P04 as Covered. P14 is the sole remaining partial — see [`ksads-compliance.md` §9](./ksads-compliance.md#9-post-integration-re-evaluation-v060).)*
 
 ### 11.1 Explicitly not proposed
 
@@ -675,7 +675,7 @@ Totals: **Covered 18 · Partial 2 · Gap 0**. The two remaining partials are erg
 | `dialogue` / `probe` node (G4) | Rejected; single-exchange nodes preferred (this §6.3) |
 | Guard-grammar aggregates (G2) | Rejected; `decide` keeps operand sets inspectable (this §4.4) |
 | Dual-timeframe paired-rating sugar (P04) | Deferred; two slots work today |
-| First-class 2-D grid (P14) | Deferred; needs nested `foreach` validation first |
+| First-class 2-D grid (P14) | Deferred by design (D2: logic stays flat). Nested `foreach` is now forbidden (VR-32, §6.5.4); the grid is encoded as outer `foreach` + inner `call`/unroll. |
 | Multi-session orchestration | Out of scope by design (this §3.1) |
 | Informant dimension on `ask`/Session flows | Replaced by session `role` (this §3.1) |
 
@@ -732,3 +732,8 @@ Eight of the nine questions in §12 remain open; none blocked integration. Quest
 - VR-1…VR-25 are defined exactly once, in order, with no duplicates.
 - Every `§`/`VR` cross-reference introduced by this proposal resolves in the revised spec.
 - Traceability in §11 above matches [§8.1 of the compliance evaluation](./ksads-compliance.md#81-per-pattern-verdicts-after-v030).
+
+### 13.4 Post-integration corrections (v0.6.0)
+
+- **Tally correction.** §11 and the compliance evaluation's §8.1 originally reported *Covered 18 · Partial 2* and named P04 as a remaining partial, although both tables mark P04 Covered. The correct v0.3.0 figure is **Covered 19 · Partial 1 · Gap 0**; P14 is the sole remaining partial. Corrected in place above.
+- **P14 rationale superseded.** The deferral reason "needs nested `foreach` validation first" is obsolete. v0.4.0 added §6.5.4, which makes the outer-`foreach` + inner-`call`/unroll pattern normative and forbids nested `foreach` (VR-32). P14 is therefore fully encodable and remains Partial only by the explicit design decision D2, matching DASH P12. See [`ksads-compliance.md` §9](./ksads-compliance.md#9-post-integration-re-evaluation-v060).

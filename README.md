@@ -13,7 +13,7 @@ The specification is developed **against real instruments**, not in the abstract
 | Version | **0.6.0** (Draft) |
 | Node types | 19 (`start`, `end`, `ask`, `say`, `llm`, `analyze`, `classify`, `branch`, `decide`, `sample`, `fork`, `join`, `loop`, `foreach`, `call`, `set`, `fetch`, `tool`, `handoff`) |
 | Validation rules | VR-1 … VR-37 |
-| Instruments assessed | 5 (KSADS, DASH, MoBI, Walrus, Ask Kai) |
+| Instruments assessed | 6 (KSADS, DASH, MoBI, Walrus, Ask Kai, GuideManifold) |
 | Current verdict | All five instruments fully encodable at v0.6.0 and rated **Sufficient**. KSADS and DASH each carry one 2-D-grid partial retained by design (P14 / P12), not by missing capability |
 
 Revisions are **additive by default**: no existing node or rule changes meaning unless a revision note says so. The one documented exception is v0.6.0's history-rendering order (see the version table). Open questions are tracked in [`spec.md` §11](spec.md#11-open-issues).
@@ -44,6 +44,7 @@ Assessed in this order; each one drove the next spec version.
 | 3 | MoBI×MSM chat trial | LLM-mediated structured experiment | v0.4.0 | v0.5.0 | Covered 24 · Partial 0 · Gap 0 — **Sufficient** |
 | 4 | Walrus open conversation | Open-ended chat with phrase/turn terminators | v0.5.0 | v0.6.0 | Covered 14 · Partial 0 · Gap 0 — **Sufficient** |
 | 5 | Ask Kai Symptom Checker | Priority-selected symptom screener + resource delivery | v0.6.0 | v0.6.0 | Covered 22 · Partial 0 · Gap 0 — **Sufficient** |
+| 6 | GuideManifold (Adaptive Scoring) | Active-turn conversational assessment with silent scoring pipeline | v0.6.0 | v0.6.0 | Covered 12 · Partial 0 · Gap 0 — **Sufficient** |
 
 ### 1. K-SADS-PL DSM-5
 
@@ -75,6 +76,12 @@ A production-style instrument: 68 guarded states selected by priority over the t
 
 [inventory](evaluations/askkai/askkai-interaction-inventory.md) · [compliance](evaluations/askkai/askkai-compliance.md)
 
+### 6. GuideManifold (Adaptive Scoring)
+
+A free-text conversation that silently scores each reply into 16 GAD-7/PHQ-9 items, updates an uncertainty-aware estimate, and actively selects the next turn from 22 candidates (probes + conversational moves) by expected information gain. Dual termination: turn budget or confidence threshold. All 12 patterns are **Covered** at v0.6.0 with no spec change.
+
+[inventory](evaluations/adaptive/adaptive-interaction-inventory.md) · [compliance](evaluations/adaptive/adaptive-compliance.md)
+
 ---
 
 ## Version history
@@ -101,7 +108,9 @@ evaluations/
   mobi/
   walrus/
   askkai/
+  adaptive/
 symptomchecker.txtpb        # ConversationSpec protobuf example (Ask Kai symptom-checker conversation)
+adaptive.md                 # GuideManifold project README (adaptive scoring demo)
 ```
 
 Every `evaluations/<instrument>/` directory contains:

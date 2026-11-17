@@ -4,12 +4,14 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft |
+| Status | RC1 |
 | Version | 0.6.0 |
 | Audience | Spec authors, runtime implementers, conversation designers |
 | Scope | Conceptual node taxonomy and graph semantics (format-agnostic) |
 
 **Revision notes (0.6.0).** Revision driven by the walrus compliance evaluation ([`evaluations/walrus/walrus-compliance.md`](evaluations/walrus/walrus-compliance.md)) and the remediation proposal ([`evaluations/walrus/proposal-v0.6.0-string-matching-and-turn-rendering.md`](evaluations/walrus/proposal-v0.6.0-string-matching-and-turn-rendering.md)). Changes: `matches` is now defined as an ASCII-case-insensitive contiguous-substring test (§5.3) with validation rule VR-37; §7.1 gains a per-turn rendering table for `ask`, `say`, and `llm`; the `loop` declares its `error` port (§4.4); §7.4 states the relationship between `limits` and `loop.max_iterations`; new §10.10. No node type was added. One behaviour changes: history now renders a turn's emitted output before the participant's response, correcting v0.5.0's user-then-assistant order for bot-speaks-first turns (§7.1, §11).
+
+v0.6.0 has been assessed against two additional instruments (Ask Kai, GuideManifold) with no capability gaps. A [node taxonomy consolidation review](evaluations/spec-consolidation-review.md) confirmed all 19 node types are distinct and irreducible. Status promoted to **RC1**.
 
 **Revision notes (0.5.0).** Additive revision driven by the MoBI compliance evaluation ([`evaluations/mobi/mobi-compliance.md`](evaluations/mobi/mobi-compliance.md)) and the remediation proposal ([`evaluations/mobi/proposal-v0.5.0-llm-interface-and-assignment.md`](evaluations/mobi/proposal-v0.5.0-llm-interface-and-assignment.md)). Changes: the `session.*` expression root and `session.seed` access (§3.1, §3.4, §5.3); core functions `range`, `shuffle`, `take`, `chunks`, `div`, `mod` and refined `get` overloads (§5.5); `llm.messages`, `llm.history`, and `llm.message_slot` (§4.3); conversation scope and prompt-assembly rules (§7.1); the subgraph termination contract and reserved `outcome` output (§4.4, §6.2); validation rules VR-33–VR-36 and an amendment to VR-7. No node type was added. One behaviour is newly defined where v0.4.0 was silent: a `conversational` `llm` now sees prior turns in its conversation scope by default (§4.3, §7.1).
 

@@ -10,7 +10,7 @@ The specification is developed **against real instruments**, not in the abstract
 
 | Field | Value |
 |---|---|
-| Version | **0.6.0** (Draft) |
+| Version | **0.6.0** (RC1) |
 | Node types | 19 (`start`, `end`, `ask`, `say`, `llm`, `analyze`, `classify`, `branch`, `decide`, `sample`, `fork`, `join`, `loop`, `foreach`, `call`, `set`, `fetch`, `tool`, `handoff`) |
 | Validation rules | VR-1 … VR-37 |
 | Instruments assessed | 6 (KSADS, DASH, MoBI, Walrus, Ask Kai, GuideManifold) |
@@ -109,6 +109,7 @@ evaluations/
   walrus/
   askkai/
   adaptive/
+  spec-consolidation-review.md       # Node taxonomy consolidation review (v0.6.0 RC1)
 symptomchecker.txtpb        # ConversationSpec protobuf example (Ask Kai symptom-checker conversation)
 adaptive.md                 # GuideManifold project README (adaptive scoring demo)
 ```
@@ -130,4 +131,4 @@ Every `evaluations/<instrument>/` directory contains:
 
 ## Next steps
 
-All five evaluated instruments are fully sufficient at v0.6.0. KSADS was re-scored from *partially sufficient* to *sufficient* after the v0.4.0–v0.6.0 revisions ([§9](evaluations/ksads/ksads-compliance.md#9-post-integration-re-evaluation-v060)); its one remaining partial (P14, family-history grid) is retained by design, as is DASH's P12. Outstanding design questions — serialization, custom-node ABI, multi-await forks, string folding, and the rest — are recorded in [`spec.md` §11](spec.md#11-open-issues). New instruments should follow the same inventory → compliance → proposal → revision loop.
+All six evaluated instruments are fully sufficient at v0.6.0. KSADS was re-scored from *partially sufficient* to *sufficient* after the v0.4.0–v0.6.0 revisions ([§9](evaluations/ksads/ksads-compliance.md#9-post-integration-re-evaluation-v060)); its one remaining partial (P14, family-history grid) is retained by design, as is DASH's P12. A [node taxonomy consolidation review](evaluations/spec-consolidation-review.md) confirmed all 19 node types are distinct and irreducible. Outstanding design questions — serialization, custom-node ABI, multi-await forks, string folding, and the rest — are recorded in [`spec.md` §11](spec.md#11-open-issues). New instruments should follow the same inventory → compliance → proposal → revision loop.

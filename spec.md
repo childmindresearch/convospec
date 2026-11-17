@@ -5,9 +5,11 @@
 | Field | Value |
 |---|---|
 | Status | Draft |
-| Version | 0.5.0 |
+| Version | 0.6.0 |
 | Audience | Spec authors, runtime implementers, conversation designers |
 | Scope | Conceptual node taxonomy and graph semantics (format-agnostic) |
+
+**Revision notes (0.6.0).** Revision driven by the walrus compliance evaluation ([`evaluations/walrus/walrus-compliance.md`](evaluations/walrus/walrus-compliance.md)) and the remediation proposal ([`evaluations/walrus/proposal-v0.6.0-string-matching-and-turn-rendering.md`](evaluations/walrus/proposal-v0.6.0-string-matching-and-turn-rendering.md)). Changes: `matches` is now defined as an ASCII-case-insensitive contiguous-substring test (§5.3) with validation rule VR-37; §7.1 gains a per-turn rendering table for `ask`, `say`, and `llm`; the `loop` declares its `error` port (§4.4); §7.4 states the relationship between `limits` and `loop.max_iterations`; new §10.10. No node type was added. One behaviour changes: history now renders a turn's emitted output before the participant's response, correcting v0.5.0's user-then-assistant order for bot-speaks-first turns (§7.1, §11).
 
 **Revision notes (0.5.0).** Additive revision driven by the MoBI compliance evaluation ([`evaluations/mobi/mobi-compliance.md`](evaluations/mobi/mobi-compliance.md)) and the remediation proposal ([`evaluations/mobi/proposal-v0.5.0-llm-interface-and-assignment.md`](evaluations/mobi/proposal-v0.5.0-llm-interface-and-assignment.md)). Changes: the `session.*` expression root and `session.seed` access (§3.1, §3.4, §5.3); core functions `range`, `shuffle`, `take`, `chunks`, `div`, `mod` and refined `get` overloads (§5.5); `llm.messages`, `llm.history`, and `llm.message_slot` (§4.3); conversation scope and prompt-assembly rules (§7.1); the subgraph termination contract and reserved `outcome` output (§4.4, §6.2); validation rules VR-33–VR-36 and an amendment to VR-7. No node type was added. One behaviour is newly defined where v0.4.0 was silent: a `conversational` `llm` now sees prior turns in its conversation scope by default (§4.3, §7.1).
 
@@ -605,7 +607,7 @@ config:
 #### `loop`
 
 - **Purpose**: Bounded iteration (e.g., repeated interview follow-ups).
-- **Ports**: `in`; `body` (enter loop body); `exit`.
+- **Ports**: `in`; `body` (enter loop body); `exit`; `error` (optional).
 - **Config**:
   - `body_entry` (REQUIRED): node id entering the body.
   - `exit_when` (REQUIRED): guard expression evaluated after each iteration.
@@ -837,6 +839,8 @@ obj_entry      = ( identifier | string ) , ":" , expr ;
 `local_ref` (`item`, `index`) is legal **only** in element-scoped positions: `decide.test.predicate`, `foreach.filter`/`order_by`/`tiebreak`/`body_graph`, and the element-scoped argument of `map`/`filter`/`find`/`count`/`any`/`all`/`none`/`sort`. In those positions `item` binds the current element and `index` its zero-based position in the source list. Their types are derived from the list argument. `item` and `index` MUST NOT appear in edge guards, `set` expressions, or `loop.exit_when`, which have no iteration binding (VR-27).
 
 **Equality and membership.** `==` and `!=` are structural on lists and objects: element-wise, order-sensitive for lists, key-set-and-value for objects. `<`, `<=`, `>`, `>=` are defined only for `number`, `string`, `date`, and `enum` (declaration order); applying them to lists, objects, or booleans MUST fail validation. `in` tests membership for a list and key presence for an object.
+
+**String matching.** `a matches b` is true when `b` occurs as a contiguous substring of `a`, comparing characters with ASCII case folding only (`A`–`Z` ↔ `a`–`z`); all other characters compare exactly. It is not a regular expression, it does not anchor, and it treats no character specially. Both operands MUST be `string` (VR-37); either operand `null` makes the result `false`, consistent with the null-comparison rule above. Folding is ASCII-only so the result does not depend on the host locale.
 
 **Named predicates** are resolved from a graph-level `predicates` registry. A predicate MUST be declared before use; undeclared predicates MUST fail validation. A predicate is a typed function: it declares `args` and `returns`, and its body is an expression over `args[i]` and, where declared, `item`.
 
@@ -1156,7 +1160,7 @@ Iteration is one-dimensional. A grid — e.g. criteria × substances — MUST be
 
 **Conversation scope.** The **visible conversation scope** of a node is the set of prior interactions it can see, and `call.state_isolation` (§4.4) sets it. In `shared` mode the scope is the whole session; in `isolated` mode it is the subgraph's own execution, so a child cannot see parent turns any more than it can read parent state. This is what keeps one trial's chat out of the next.
 
-**History assembly.** An `llm` assembles its prompt as: leading `system` messages, then the block selected by `history`, then the remaining messages in declaration order (§4.3). `history` takes one of four shapes:
+**History assembly.** An `llm` assembles its prompt as: leading `system` messages, then the block selected by `history`, then the remaining messages in declaration order (§4.3). An **interaction** is one turn (§3.3) — a node's user-facing output and the participant's response — and each is rendered by the turn-rendering rule below. `history` takes one of four shapes:
 
 | Shape | Meaning |
 |---|---|
@@ -1165,7 +1169,20 @@ Iteration is one-dimensional. A grid — e.g. criteria × substances — MUST be
 | `{last: N}` | The last `N` interactions in scope. `N` MUST be a non-negative integer; `0` is equivalent to `none`. |
 | `{from: [...]}` | The listed `{role, template}` entries, in the given order. |
 
-`last` and `from` MAY be combined; `from` entries render first, then the selected interactions. An **interaction** is one user-facing exchange — the participant's message and the reply that followed — matching the transcript's unit (§3.1). Each rendered interaction becomes one `user` message (the participant's text) followed by one `assistant` message (the generated text). Arbitrary state is not serialized into the prompt by default, because there is no canonical rendering for nested values; an author who wants a specific value in the prompt declares it with `from`, which reuses the template mechanism (§3.2).
+`last` and `from` MAY be combined; `from` entries render first, then the selected interactions.
+
+**Turn rendering.** History is assembled from the turns in the visible scope, in chronological order. Each turn renders by node type:
+
+| Node | Emitted output | Participant response |
+|---|---|---|
+| `ask` | one `assistant` message (the prompt) | one `user` message (the validated reply) |
+| `llm` (`conversational`) | one `assistant` message (the emitted text) | one `user` message (the validated reply) |
+| `say` | one `assistant` message (the text) | — |
+| `llm` (`silent`), and all other `await: none` nodes | no message | — |
+
+Within a turn the emitted output renders before the participant's response, because that is the order in which they occurred. Turns render in the order they executed, so a bot-speaks-first conversation renders `assistant`, `user`, `assistant`, `user`, … An `ask` prompt and a `say` message are authored text, not model output, but they are user-facing and render with the `assistant` role so the model sees what it is continuing. A `history` shape selects **turns**, not messages, so one turn may contribute two messages.
+
+Arbitrary state is not serialized into the prompt by default, because there is no canonical rendering for nested values; an author who wants a specific value in the prompt declares it with `from`, which reuses the template mechanism (§3.2).
 
 ### 7.2 Awaiting and Silence
 
@@ -1182,6 +1199,8 @@ Iteration is one-dimensional. A grid — e.g. criteria × substances — MUST be
 ### 7.4 Budgets
 
 When any `limits` value is exceeded, the runtime MUST terminate the current path at `on_error` or an `end` with outcome `limit_exceeded`. Budgets MUST be checked at turn boundaries.
+
+A `loop.max_iterations` is the local bound for that loop; graph `limits` are session-wide backstops checked at turn boundaries. When both are configured, the loop's bound SHOULD be set at or below the corresponding session limit so the loop's `exit` is reached first. If a session limit fires before the loop exits, the path terminates at `limit_exceeded` and the loop's `exit` is not taken.
 
 ### 7.5 Determinism and Replay
 
@@ -1233,6 +1252,7 @@ A graph MUST pass all rules below before execution. Rules are numbered for refer
 - **VR-34** — An `llm` MUST declare exactly one of `prompt_template` or `messages`; `messages` MUST contain at least one entry, at least one of which has role `user` or `assistant`; every `role` MUST be `system`, `user`, or `assistant`; every `system` message MUST precede every non-system message; every template MUST resolve.
 - **VR-35** — `llm.history` MUST be `all`, `none`, `{last: N}` with `N` a non-negative integer, or `{from: [...]}` of `{role, template}` entries; every `from` reference MUST resolve in the node's visible conversation scope (§7.1); `message_slot` MUST be a declared `string` state variable, MUST differ from `slot`, MUST be declared in `effects.write`, and MUST NOT appear when `mode: silent`.
 - **VR-36** — Every subgraph exposes a reserved `outcome` output and MUST NOT declare an output of that name; a subgraph `end` MUST return control through the caller's `out`; an `output_map` binding for `outcome` MUST target a declared `enum` or `string` state variable (§6.2).
+- **VR-37** — Both operands of `matches` MUST be `string`; an implementation MUST evaluate it as a case-insensitive (ASCII folding) contiguous-substring test with no regular-expression or anchoring semantics (§5.3).
 
 ---
 
@@ -1794,6 +1814,103 @@ The caller fragment derives a block-balanced assignment from the session seed an
 
 Validation: the trial graph passes VR-1…VR-36; the caller fragment is shown without its enclosing state declarations. `bot_1` declares leading `system` messages and a `from` history block, so the assembled prompt is system instructions, then the two recorded values, then the story (VR-34). `bot_2` uses `history: all`, which renders the first exchange and both participant messages in order (§7.1). `message_slot` lets `crisis_check` inspect the text that was actually sent, which `slot` alone cannot provide (VR-35). The trial's three `end` nodes differ only in `outcome`, and the caller binds it through `output_map` (VR-36); `state_isolation: isolated` means the trial's conversation scope does not extend to earlier trials. `build_assignment` is a pure function of `state.cells`, `state.reps`, and `session.seed`, and its result is written to state, so the realized order is auditable rather than re-derived (VR-33, §7.5).
 
+### 10.10 Bounded Free Conversation with a Phrase Terminator
+
+Demonstrates a seeded random opener (P02), an `ask` opener rendered into history (§7.1), a bounded loop of single-exchange `llm` turns, and a literal phrase test with `matches` (§5.3, VR-37). The conversation runs until the participant utters the phrase or 100 loop turns elapse.
+
+```yaml
+graph:
+  id: walrus_conversation
+  version: 0.1.0
+  entry: start
+  on_error: abandoned
+  context:
+    persona: "You are a warm, curious conversation partner."
+    openers:
+      - "What's on your mind?"
+      - "How has your day been?"
+      - "What have you been thinking about lately?"
+  limits:
+    max_turns: 101
+    max_wall_clock_s: 7200
+    max_tokens: 200000
+  state_schema:
+    opener_prompt:      { type: string,  scope: session, mutable: true }
+    last_reply:         { type: string,  scope: session, mutable: true }
+    turn_count:         { type: integer, scope: session, mutable: true }
+    termination_reason: { type: string,  scope: session, mutable: true }
+  nodes:
+    - { id: start, type: start }
+    - id: choose_opener
+      type: set
+      effects: { write: [opener_prompt] }
+      config:
+        assignments:
+          - slot: opener_prompt
+            expression: "get(shuffle(context.openers, session.seed), 0)"
+    - id: open
+      type: ask
+      config:
+        prompt: "{{ state.opener_prompt }}"
+        input_type: text
+        slot: last_reply
+        timeout_s: 1800
+    - { id: open_check, type: branch }
+    - id: convo_loop
+      type: loop
+      effects: { write: [turn_count] }
+      config:
+        body_entry: chat_turn
+        exit_when: "state.last_reply matches 'you MUST be a walrus!'"
+        max_iterations: 100
+        counter_slot: turn_count
+    - id: chat_turn
+      type: llm
+      effects: { write: [last_reply] }
+      config:
+        model: m1
+        mode: conversational
+        messages:
+          - { role: system, template: "{{ context.persona }}" }
+          - { role: user,   template: "Reply to my last message and keep the conversation going." }
+        history: all
+        slot: last_reply
+        timeout_s: 1800
+    - { id: classify_exit, type: branch }
+    - id: mark_phrase
+      type: set
+      effects: { write: [termination_reason] }
+      config:
+        assignments:
+          - { slot: termination_reason, expression: "'phrase'" }
+    - id: mark_cap
+      type: set
+      effects: { write: [termination_reason] }
+      config:
+        assignments:
+          - { slot: termination_reason, expression: "'turn_cap'" }
+    - { id: done, type: end, config: { outcome: completed } }
+    - { id: abandoned, type: end, config: { outcome: abandoned } }
+  edges:
+    - { from: start,         to: choose_opener, type: next }
+    - { from: choose_opener, to: open,          type: next }
+    - { from: open,          port: timeout, to: abandoned, type: next }
+    - { from: open,          to: open_check,    type: next }
+    - { from: open_check,    to: mark_phrase,   type: conditional, when: "state.last_reply matches 'you MUST be a walrus!'", priority: 1 }
+    - { from: open_check,    to: convo_loop,    type: default }
+    - { from: convo_loop,    port: body, to: chat_turn, type: next }
+    - { from: chat_turn,     to: convo_loop,    type: next }
+    - { from: chat_turn,     port: timeout, to: abandoned, type: next }
+    - { from: convo_loop,    port: exit, to: classify_exit, type: next }
+    - { from: classify_exit, to: mark_phrase,   type: conditional, when: "state.last_reply matches 'you MUST be a walrus!'", priority: 1 }
+    - { from: classify_exit, to: mark_cap,      type: default }
+    - { from: mark_phrase,   to: done,          type: next }
+    - { from: mark_cap,      to: done,          type: next }
+  terminals: [done, abandoned]
+```
+
+Validation: passes VR-1…VR-37. `choose_opener` is a pure function of `context.openers` and `session.seed`, and writes the realized prompt to state (§3.4, §7.5). The opener is an `ask`, so the first `chat_turn` sees it rendered as an `assistant` message followed by the participant's `user` reply (§7.1). The loop body is a single `llm`, so one iteration is one bot message and one reply; exiting after the body leaves no dangling message, and `exit_when` is checked every turn (§4.4, VR-24). `matches` is a case-insensitive substring test, so `you must be a walrus!` and `well, you must be a walrus! anyway` both terminate while `you must be a walrus` does not (§5.3, VR-37). The two phrase checks — after the opener and after the loop — cover a participant who says the phrase on the very first turn. `mark_phrase` and `mark_cap` record which terminator fired, and `limits` is a backstop above the loop's own bound (§7.4).
+
 ---
 
 ## 11. Open Issues
@@ -1805,6 +1922,8 @@ Validation: the trial graph passes VR-1…VR-36; the caller fragment is shown wi
 - **Randomization breadth**: node-level `sample` is chosen for v1; revisit whether edge-level weights or deterministic assignment strategies (quota, A/B bucketing) are needed. Design assignment is now expressible with `session.seed` plus `shuffle`/`take`/`range` (§5.5, §10.9); whether a dedicated assignment primitive is warranted remains open.
 - **Permutation algorithm**: `shuffle` is property-based, so two conforming implementations MAY permute differently for the same seed (§5.5). Pinning a PRNG and algorithm would make assignments portable across implementations at the cost of freezing an algorithm in the spec. The realized assignment is written to state either way.
 - **History rendering**: `history.from` uses `{role, template}` entries rather than plain references, because plain references would need a serialization rule for every type (§7.1). Revisit if a canonical rendering is ever specified.
+- **String folding**: `matches` folds ASCII case only, so non-Latin scripts compare exactly (§5.3). Full Unicode case folding is locale- and version-dependent across runtimes; revisit if an instrument needs it.
+- **Turn rendering order**: v0.6.0 renders a turn's emitted output before the participant's response (§7.1), correcting v0.5.0's user-then-assistant order for bot-speaks-first turns. The alternative pairing drops the participant's latest message from the prompt; revisit only if a canonical chat ordering is needed.
 - **Session reference set**: `session.*` exposes `seed`, `id`, `case_id`, and `role` (§3.1). Extend only when an instrument needs another scalar field.
 - **Streaming and partial responses**: token streaming, partial validation, and interruption semantics.
 - **Localization and rendering**: message catalogs, RTL, and channel-specific rendering of `ask` input types.

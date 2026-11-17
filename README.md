@@ -13,8 +13,8 @@ The specification is developed **against real instruments**, not in the abstract
 | Version | **0.6.0** (Draft) |
 | Node types | 19 (`start`, `end`, `ask`, `say`, `llm`, `analyze`, `classify`, `branch`, `decide`, `sample`, `fork`, `join`, `loop`, `foreach`, `call`, `set`, `fetch`, `tool`, `handoff`) |
 | Validation rules | VR-1 … VR-37 |
-| Instruments assessed | 4 (KSADS, DASH, MoBI, Walrus) |
-| Current verdict | All four instruments fully encodable at v0.6.0 and rated **Sufficient**. KSADS and DASH each carry one 2-D-grid partial retained by design (P14 / P12), not by missing capability |
+| Instruments assessed | 5 (KSADS, DASH, MoBI, Walrus, Ask Kai) |
+| Current verdict | All five instruments fully encodable at v0.6.0 and rated **Sufficient**. KSADS and DASH each carry one 2-D-grid partial retained by design (P14 / P12), not by missing capability |
 
 Revisions are **additive by default**: no existing node or rule changes meaning unless a revision note says so. The one documented exception is v0.6.0's history-rendering order (see the version table). Open questions are tracked in [`spec.md` §11](spec.md#11-open-issues).
 
@@ -43,6 +43,7 @@ Assessed in this order; each one drove the next spec version.
 | 2 | DASH Adult | Single-informant structured interview | v0.3.0 | v0.4.0 | Covered 23 · Partial 1 · Gap 0 — **Sufficient** |
 | 3 | MoBI×MSM chat trial | LLM-mediated structured experiment | v0.4.0 | v0.5.0 | Covered 24 · Partial 0 · Gap 0 — **Sufficient** |
 | 4 | Walrus open conversation | Open-ended chat with phrase/turn terminators | v0.5.0 | v0.6.0 | Covered 14 · Partial 0 · Gap 0 — **Sufficient** |
+| 5 | Ask Kai Symptom Checker | Priority-selected symptom screener + resource delivery | v0.6.0 | v0.6.0 | Covered 22 · Partial 0 · Gap 0 — **Sufficient** |
 
 ### 1. K-SADS-PL DSM-5
 
@@ -67,6 +68,12 @@ A structured experiment in which the LLM **is** the manipulation: stance is a sy
 Deliberately the inverse of the diagnostic interviews: almost no structure. A seeded random opener, an unbounded chat, and two terminators (a literal phrase or 100 turns). It surfaced the last two seams — literal string matching and history rendering across a non-model turn. Drove `matches` semantics and the per-turn rendering table in v0.6.0.
 
 [inventory](evaluations/walrus/walrus-interaction-inventory.md) · [compliance](evaluations/walrus/walrus-compliance.md) · [proposal](evaluations/walrus/proposal-v0.6.0-string-matching-and-turn-rendering.md)
+
+### 5. Ask Kai Symptom Checker
+
+A production-style instrument: 68 guarded states selected by priority over the transcript, ten disorder supplements, model-derived diagnoses and severity, resource delivery, email/report/newsletter actions, and a closing survey. It is the first instrument authored as a **rule set rather than a graph**; the encoding uses a dispatcher `loop` + candidate `views` + registry `call` + a materialised-transcript convention. All 22 patterns are **Covered** at v0.6.0 with no spec change.
+
+[inventory](evaluations/askkai/askkai-interaction-inventory.md) · [compliance](evaluations/askkai/askkai-compliance.md)
 
 ---
 
@@ -93,7 +100,8 @@ evaluations/
   dash/
   mobi/
   walrus/
-symptomchecker.txtpb        # ConversationSpec protobuf example (symptom-checker conversation)
+  askkai/
+symptomchecker.txtpb        # ConversationSpec protobuf example (Ask Kai symptom-checker conversation)
 ```
 
 Every `evaluations/<instrument>/` directory contains:
@@ -113,4 +121,4 @@ Every `evaluations/<instrument>/` directory contains:
 
 ## Next steps
 
-The evaluated instruments are all sufficient at v0.6.0. KSADS was re-scored from *partially sufficient* to *sufficient* after the v0.4.0–v0.6.0 revisions ([§9](evaluations/ksads/ksads-compliance.md#9-post-integration-re-evaluation-v060)); its one remaining partial (P14, family-history grid) is retained by design, as is DASH's P12. Outstanding design questions — serialization, custom-node ABI, multi-await forks, string folding, and the rest — are recorded in [`spec.md` §11](spec.md#11-open-issues). New instruments should follow the same inventory → compliance → proposal → revision loop.
+All five evaluated instruments are fully sufficient at v0.6.0. KSADS was re-scored from *partially sufficient* to *sufficient* after the v0.4.0–v0.6.0 revisions ([§9](evaluations/ksads/ksads-compliance.md#9-post-integration-re-evaluation-v060)); its one remaining partial (P14, family-history grid) is retained by design, as is DASH's P12. Outstanding design questions — serialization, custom-node ABI, multi-await forks, string folding, and the rest — are recorded in [`spec.md` §11](spec.md#11-open-issues). New instruments should follow the same inventory → compliance → proposal → revision loop.

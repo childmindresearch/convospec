@@ -5,9 +5,11 @@
 | Field | Value |
 |---|---|
 | Status | Draft |
-| Version | 0.3.0 |
+| Version | 0.4.0 |
 | Audience | Spec authors, runtime implementers, conversation designers |
 | Scope | Conceptual node taxonomy and graph semantics (format-agnostic) |
+
+**Revision notes (0.4.0).** Additive revision driven by the DASH compliance evaluation ([`evaluations/dash/dash-compliance.md`](evaluations/dash/dash-compliance.md)) and the remediation proposal ([`evaluations/dash/proposal-v0.4.0-expressions-and-views.md`](evaluations/dash/proposal-v0.4.0-expressions-and-views.md)). Changes: typed expression library with collection/object constructors and aggregates (§5.5); expression extensibility tiers — a mandated core plus declared implementation extensions (§5.6); `set` widened to any type with atomic simultaneous assignment (§4.5); derived read-only `views` (§3.8) and the `views.*` namespace; canonical collection/accumulation patterns (§6.5.3); validation rules VR-26–VR-31 and amendments to VR-7/8/20/23. No node type was added and no v0.3.0 construct changed meaning.
 
 **Revision notes (0.3.0).** Additive revision driven by the KSADS compliance evaluation ([`evaluations/ksads/ksads-compliance.md`](evaluations/ksads/ksads-compliance.md)) and the remediation proposal ([`evaluations/ksads/proposal-v0.3.0-ksads-remediation.md`](evaluations/ksads/proposal-v0.3.0-ksads-remediation.md)). Changes: new `decide` and `foreach` control nodes; `graph_registry` for bounded dynamic dispatch; session identity, links, and exports for multi-informant cases; the `session_store` data-source kind; `ask.options_ref`; principles P8 (single-exchange nodes) and P9 (session-scoped identity); validation rules VR-20–VR-25. No existing node type changed incompatibly.
 
@@ -49,6 +51,7 @@ This specification defines the primitive **node types** from which arbitrary con
 - Distinguish mutable session State, read-only inline Context, and external Data Sources, with declared, auditable access.
 - Support multi-session cases in which informant-specific sessions exchange declared, read-only data.
 - Support declarative decision logic over typed state operands and runtime-ordered dispatch of reusable subgraphs.
+- Support declarative computation over collections — aggregates, constructors, and named derived views — so scores, counts, and summaries are inspectable values rather than out-of-band code.
 
 **Non-Goals**
 
@@ -57,6 +60,8 @@ This specification defines the primitive **node types** from which arbitrary con
 - UI/rendering details beyond input-type semantics.
 - Multi-agent orchestration, or case-level orchestration of multiple sessions (spawning, ordering, retry, concurrency), outside a single conversation graph.
 - A full plugin ABI for custom nodes (stub only; see §9).
+- A reporting, dashboard, or presentation layer. Derived views (§3.8) are readable values; how they are displayed is out of scope.
+- An exhaustive standard library. §5.5 mandates a minimum; implementations MAY expose further pure operations from their host language as declared extensions (§5.6).
 
 ---
 
@@ -71,6 +76,7 @@ This specification defines the primitive **node types** from which arbitrary con
 - **P7 — Extensible without churn.** New node types MUST be addable through a declared contract without altering existing graph structure (§9).
 - **P8 — Single-exchange nodes.** A node MUST perform at most one user exchange. Multi-exchange sub-dialogues MUST be expressed as an explicit loop of single-exchange nodes; no node type may encapsulate an unbounded internal dialogue (§6.5).
 - **P9 — Session-scoped identity, declared links.** Participant and informant identity belong to the session, not to the graph. Data crosses session boundaries only through declared, immutable, acyclic links and declared exports (§3.7).
+- **P10 — Portable core, declared extensions.** The mandated expression library MUST behave identically in every conforming implementation. Operations beyond it MAY be supplied by an implementation, but only when declared, typed, pure, and deterministic (§5.6).
 
 ---
 
@@ -136,8 +142,9 @@ state_schema:
 - Every write MUST be declared in the node's `effects.write`.
 - Writes to `global` scope MUST be explicitly permitted by graph policy; otherwise they are rejected.
 - `turn`-scoped variables MUST be reset when a turn ends.
+- State is mutable and written; it is not a cache for derived values. A value that is a pure function of other state SHOULD be declared as a view (§3.8) rather than maintained by `set`. A deliberate point-in-time snapshot is legitimately state and MUST NOT be confused with a view.
 
-Templates (for `prompt`/`message` fields) use `{{ state.<path> }}` interpolation. A runtime MUST treat missing references as an error unless a default is declared.
+Templates (for `prompt`/`message` fields) use `{{ state.<path> }}` or `{{ views.<name> }}` interpolation. A runtime MUST treat missing references as an error unless a default is declared.
 
 ### 3.3 Turn
 
@@ -247,6 +254,60 @@ session:
 - A session that is still `active` MAY be read. The reader MUST treat absent exports as `null` and MUST apply an explicit missing-value policy (see `decide.on_missing`, §4.4).
 - A session MUST NOT await, sequence, retry, or terminate another session (P9). Only exported data crosses the boundary.
 
+### 3.8 Derived Views
+
+A **view** is a named, read-only, deterministically recomputed value derived from State, Context, or other views. A view is **not** state: it cannot be written, it is not declared in `state_schema`, and it is not subject to scope or mutation.
+
+```yaml
+views:
+  mdd_responses:
+    type: list<enum>
+    source: [state.mdd_q1, state.mdd_q2, state.mdd_q3]
+
+  mdd_score:
+    type: integer
+    expr: "count(views.mdd_responses, item == 'yes')"
+
+  mdd_flagged:
+    type: boolean
+    expr: "views.mdd_score >= 3"
+
+  intake_summary:
+    type: string
+    expr: "join([state.q_name, state.q_reason, state.q_goal], ' | ')"
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | yes | The view's value type: `list<T>`, `object`, or a scalar type (§3.2). |
+| `source` | conditional | A list of references (`state.*`, `context.*`, or `views.*`); sugar for a list literal. REQUIRED if `expr` is absent. |
+| `expr` | conditional | An expression (§5.3) evaluating to `type`. REQUIRED if `source` is absent. |
+
+Exactly one of `source` or `expr` MUST be present.
+
+**Rules**
+
+- Views are **read-only**. No node MAY write a view; `set`, `ask`, `fetch`, and `tool` MUST NOT target one. A view name MUST NOT collide with a `state_schema` variable or a `context` path.
+- A view's value is a **pure function of current State, Context, and other views**. A runtime MAY cache or recompute at will; the observable value MUST be identical. Caching and invalidation are not specified.
+- The view dependency graph MUST be acyclic, and every reference MUST resolve (VR-29).
+- Views MUST NOT perform I/O, call models, read wall-clock time, or consume randomness. Time and locale come from `context` or State, never from the runtime clock.
+- A node that reads a view in its own config MUST declare it in `effects.read` by its bare name, e.g. `read: [mdd_score]` (VR-30). The validator expands view dependencies to the underlying state variables for VR-7. Guard references resolve without a separate declaration, as with `state.*`.
+- Views are referenced as `views.<name>` wherever `state.*` is legal: expressions, edge guards, `loop.exit_when`, `decide` operands, `foreach.over`, `ask.options_ref`, and templates.
+- A graph-level `views` block is OPTIONAL; a graph with none behaves exactly as in v0.3.0.
+
+**Why a separate namespace.** State is mutable and written; views are derived and read-only. Keeping them apart makes write-validation and replay reasoning direct, and prevents a derived value from being silently overwritten.
+
+**Scope of the feature.** Views exist so that state can be *projected*: assembled from many slots, aggregated, and read back as one value. That a user interface, an export, or a message can consume a view follows from its being an ordinary readable value; it is not a design goal. This specification defines no dashboard, layout, or presentation format.
+
+**Heterogeneous sections.** When a section's items differ in type, build a list of objects with `expr`:
+
+```yaml
+views:
+  intake_section:
+    type: list<object>
+    expr: "[{key: 'name', value: state.q_name}, {key: 'reason', value: state.q_reason}]"
+```
+
 ---
 
 ## 4. Node Taxonomy
@@ -310,7 +371,7 @@ Only one path MAY be in `user` await at a time (P5, VR-11).
 | `slot` | yes | State variable receiving the validated value. |
 | `input_type` | yes | One of the enum below. |
 | `response_schema` | conditional | Validation schema; REQUIRED for `custom`. |
-| `options_ref` | no | List-typed state reference supplying the option set at turn time; alternative to static `options`. |
+| `options_ref` | no | List-typed state or view reference supplying the option set at turn time; alternative to static `options`. |
 | `required` | no | Whether an empty response is acceptable (default `true`). |
 | `retries` | no | Max re-prompts on invalid input (default `0`). |
 | `timeout_s` | no | Time to wait before firing the `timeout` edge. |
@@ -330,7 +391,7 @@ Only one path MAY be in `user` await at a time (P5, VR-11).
 | `date` | date | `min`, `max` |
 | `custom` | any | `response_schema` |
 
-For `single_select` and `multi_select`, the option set MUST be supplied by exactly one of `options` (static) or `options_ref` (resolved from state). When `options_ref` is used, the response MUST validate against the resolved set.
+For `single_select` and `multi_select`, the option set MUST be supplied by exactly one of `options` (static) or `options_ref` (resolved from state or a view). When `options_ref` is used, the response MUST validate against the resolved set.
 
 - **Effects**: writes `slot`.
 - **Await**: `user`.
@@ -442,14 +503,14 @@ Model-backed nodes MUST declare `effects.write` and MUST record enough provenanc
 
 | Field | Required | Description |
 |---|---|---|
-| `operands` | yes | `{ refs: [...] }` (explicit list) or `{ list_ref: state.x }` (list-typed variable). |
+| `operands` | yes | `{ refs: [...] }` (explicit list) or `{ list_ref: state.x }` (list-typed variable or view). |
 | `test` | conditional | REQUIRED for non-boolean operands; MUST be omitted for boolean operands. |
 | `combine` | yes | `any`, `all`, `none`, or `n_of_k`. |
 | `k` | conditional | REQUIRED for `n_of_k`; MUST be a positive integer. |
 | `on_missing` | no | `unknown` (default), `skip`, or `fail`. |
 | `result_slot` | no | Receives the boolean result for audit or later reuse. |
 
-- **Operands**: `refs` entries are a state reference or `{ ref: state.x, negate: true }`; `negate` inverts that operand's test result. All operands MUST share a type, and `list_ref` MUST resolve to a `list<T>`.
+- **Operands**: `refs` entries are a state or view reference, or an object `{ ref: state.x, negate: true }`; `negate` inverts that operand's test result. All operands MUST share a type, and `list_ref` MUST resolve to a `list<T>`.
 - **`test`** compares each operand to a literal, set, or range. It MUST NOT compare operands to each other; pairwise comparison belongs in a `branch` guard (§5.3).
 
 | Operand type | Legal `test` | Required parameters |
@@ -553,7 +614,7 @@ config:
 
 | Field | Required | Description |
 |---|---|---|
-| `over` | yes | `{ list_ref: state.x }` (list-typed variable) or `{ registry: name }` (registry projection, §6.1). |
+| `over` | yes | `{ list_ref: state.x }` (list-typed variable or view) or `{ registry: name }` (registry projection, §6.1). |
 | `filter` | no | Scoped expression over `item.`; elements failing it are skipped. |
 | `order_by` | no | Scoped expression over `item.`; ascending unless `descending: true`. |
 | `descending` | no | Boolean; default `false`. |
@@ -596,7 +657,7 @@ config:
 
 #### `set`
 
-- **Purpose**: Deterministic state mutation (assignment or expression evaluation).
+- **Purpose**: Deterministic state mutation (assignment or expression evaluation), including assembly of collections and objects from existing state.
 - **Ports**: `in`; `out`.
 - **Config**:
   - `assignments` (REQUIRED): list of `{slot, expression}` entries.
@@ -605,7 +666,13 @@ config:
 - **Requirements**:
   - A `set` node MUST be pure with respect to the external world and MUST NOT perform I/O.
   - Expressions MUST be evaluated using the guard/expression grammar (§5.3).
+  - An expression MAY evaluate to any declared type, including `list<T>` and `object`. Values are immutable; constructors (`append`, `concat`, `put`, `merge`, …) return new values (§5.5).
+  - All assignments in one `set` node MUST be evaluated **simultaneously** against the state at node entry and then applied atomically. No assignment MAY observe another assignment's write in the same node (VR-28).
+  - Self-reference is legal and reads the pre-node value: `append(state.log, state.current_item)` appends to the previous list.
   - All written slots MUST be declared in `effects.write`.
+  - A `set` MUST NOT target `context.*` (VR-18) or a view (§3.8).
+
+A `set` inside a `foreach` body that reads and appends its own list slot is the canonical accumulator pattern (§6.5.3). It is legal because each iteration is a separate `set` execution and therefore sees the previous iteration's write.
 
 ### 4.6 External Family
 
@@ -721,47 +788,131 @@ Exactly one edge MUST be taken. If none applies and no `default` exists, the gra
 Guards and `set` expressions use the same grammar:
 
 ```ebnf
-guard        = or_expr ;
-or_expr      = and_expr , { "or" , and_expr } ;
-and_expr     = not_expr , { "and" , not_expr } ;
-not_expr     = [ "not" ] , primary ;
-primary      = comparison
-             | predicate_call
-             | "(" , guard , ")" ;
-comparison   = operand , comp_op , operand ;
-comp_op      = "==" | "!=" | "<" | "<=" | ">" | ">=" | "in" | "matches" ;
-operand      = arith ;
-arith        = term , { ( "+" | "-" ) , term } ;
-term         = factor , { ( "*" | "/" ) , factor } ;
-factor       = number | string | boolean | "null"
-             | ref
-             | "(" , arith , ")" ;
-ref          = "state." , identifier , { "." , identifier }
-             | "context." , identifier , { "." , identifier } ;
-local_ref    = "item" , { "." , identifier } ;
-predicate_call = identifier , "(" , [ operand , { "," , operand } ] , ")" ;
+guard          = or_expr ;
+or_expr        = and_expr , { "or" , and_expr } ;
+and_expr       = not_expr , { "and" , not_expr } ;
+not_expr       = [ "not" ] , primary ;
+primary        = comparison | expr | "(" , guard , ")" ;
+comparison     = expr , comp_op , expr ;
+comp_op        = "==" | "!=" | "<" | "<=" | ">" | ">=" | "in" | "matches" ;
+expr           = arith ;
+arith          = term , { ( "+" | "-" ) , term } ;
+term           = factor , { ( "*" | "/" ) , factor } ;
+factor         = number | string | boolean | "null"
+               | ref
+               | local_ref
+               | call
+               | list_literal
+               | object_literal
+               | "(" , expr , ")" ;
+ref            = "state." , identifier , { "." , identifier }
+               | "context." , identifier , { "." , identifier }
+               | "views." , identifier ;
+local_ref      = ( "item" | "index" ) , { "." , identifier } ;
+call           = name , "(" , [ expr , { "," , expr } ] , ")" ;
+name           = identifier , { "." , identifier } ;
+list_literal   = "[" , [ expr , { "," , expr } ] , "]" ;
+object_literal = "{" , [ obj_entry , { "," , obj_entry } ] , "}" ;
+obj_entry      = ( identifier | string ) , ":" , expr ;
 ```
 
-`local_ref` is legal **only** inside node-scoped expression fields: `decide.test.predicate`, `foreach.filter`, `foreach.order_by`, `foreach.tiebreak`, and `foreach.body_graph`. In those contexts `item` binds the current element and its type is derived from the node's `over` operand. `item` MUST NOT appear in edge guards, `set` expressions, or `loop.exit_when`, which have no iteration binding.
+`call` resolves to one of three things, in this order: a core function (§5.5), a namespaced implementation extension (§5.6), or a named predicate declared in the graph's `predicates` registry. A call name MUST NOT begin with the reserved roots `state`, `context`, or `views`. Core and extension names are reserved; a predicate MUST NOT shadow them (VR-26).
 
-**Named predicates** are resolved from a graph-level `predicates` registry. A predicate MUST be declared before use; undeclared predicates MUST fail validation.
+`local_ref` (`item`, `index`) is legal **only** in element-scoped positions: `decide.test.predicate`, `foreach.filter`/`order_by`/`tiebreak`/`body_graph`, and the element-scoped argument of `map`/`filter`/`find`/`count`/`any`/`all`/`none`/`sort`. In those positions `item` binds the current element and `index` its zero-based position in the source list. Their types are derived from the list argument. `item` and `index` MUST NOT appear in edge guards, `set` expressions, or `loop.exit_when`, which have no iteration binding (VR-27).
+
+**Equality and membership.** `==` and `!=` are structural on lists and objects: element-wise, order-sensitive for lists, key-set-and-value for objects. `<`, `<=`, `>`, `>=` are defined only for `number`, `string`, `date`, and `enum` (declaration order); applying them to lists, objects, or booleans MUST fail validation. `in` tests membership for a list and key presence for an object.
+
+**Named predicates** are resolved from a graph-level `predicates` registry. A predicate MUST be declared before use; undeclared predicates MUST fail validation. A predicate is a typed function: it declares `args` and `returns`, and its body is an expression over `args[i]` and, where declared, `item`.
 
 ```yaml
 predicates:
   risk_exceeds:
     args: [number]
     returns: boolean
-    expr: "state.risk_score > args[0]"
+    expr: "args[0] > state.risk_threshold"
 ```
 
-- Guards MUST be side-effect free.
-- A guard referencing an unset state variable MUST evaluate to `null`, and comparisons with `null` MUST be `false` (except `== null` / `!= null`). A reference to an undeclared `context.*` path MUST fail validation.
+- Guards and expressions MUST be side-effect free.
+- A reference to an unset state variable MUST evaluate to `null`, and comparisons with `null` MUST be `false` (except `== null` / `!= null`). A reference to an undeclared `context.*` path MUST fail validation.
+- An empty list or object literal takes its type from its assignment slot or enclosing parameter; with no contextual type it MUST fail validation (VR-28).
 
 ### 5.4 Cycles and Loop Guards
 
 - Unguarded cycles are forbidden (VR-10).
 - A cycle MUST pass through either a `loop` node or a `conditional` edge whose guard is proven to eventually terminate (e.g., bounded counter).
 - The runtime MUST enforce `loop.max_iterations` and the graph-level `limits`.
+
+### 5.5 Standard Function Library
+
+These functions are the **conformance minimum**: every implementation MUST provide all of them, with the semantics given here. They are pure, deterministic, and total; behaviour on `null` and empty inputs is defined per row. Additional operations are permitted as declared extensions (§5.6), but MUST NOT alter these.
+
+| Function | Signature | Semantics |
+|---|---|---|
+| `len` | `len(list\|string\|object) -> integer` | Number of elements, characters, or keys. `null` → `0`. |
+| `count` | `count(list<T>) -> integer` | Number of **non-null** elements. |
+| `count` | `count(list<T>, predicate) -> integer` | Number of elements satisfying the element-scoped predicate. |
+| `sum` | `sum(list<number>) -> number` | Sum; empty → `0`; `null` elements skipped. |
+| `avg` | `avg(list<number>) -> number \| null` | Mean of non-null elements; empty → `null`. |
+| `min` / `max` | `min(list<T>) -> T \| null` | Minimum/maximum under the type's natural order; empty → `null`. |
+| `any` / `all` / `none` | `any(list<T>, predicate) -> boolean` | Existential; universal; empty-or-none-satisfy. |
+| `map` | `map(list<T>, selector) -> list<U>` | Element-wise projection; `item`/`index` bound. |
+| `filter` | `filter(list<T>, predicate) -> list<T>` | Keep elements satisfying the predicate, preserving order. |
+| `find` | `find(list<T>, predicate) -> T \| null` | First matching element, else `null`. |
+| `append` / `prepend` | `append(list<T>, T) -> list<T>` | New list with one element at the end / start. |
+| `concat` | `concat(list<T>, …) -> list<T>`; `concat(string, …) -> string` | Concatenate lists, or join strings. |
+| `flatten` | `flatten(list<list<T>>) -> list<T>` | One level of flattening. |
+| `distinct` | `distinct(list<T>) -> list<T>` | Deduplicate, keeping first-occurrence order. |
+| `slice` | `slice(list<T>\|string, start, end?) -> same` | Half-open range; `end` defaults to length. |
+| `sort` | `sort(list<T>, key?, descending?) -> list<T>` | Stable sort under a total order; `key` is element-scoped. |
+| `reverse` | `reverse(list<T>\|string) -> same` | Reverse order. |
+| `merge` | `merge(object, …) -> object` | Shallow merge; later keys win. |
+| `keys` / `values` | `keys(object) -> list<string>`; `values(object) -> list<any>` | Keys / values in insertion order. |
+| `get` | `get(object\|list, key\|index, default?) -> any` | Value at key/index, else `default` (`null`). |
+| `put` | `put(object, key, value) -> object` | Immutable insert or overwrite. |
+| `has` | `has(object, key) -> boolean` | Key presence. |
+| `join` | `join(list<string>, separator) -> string` | Join; `null` elements become empty strings. |
+| `if` | `if(boolean, T, T) -> T` | Conditional selection; both branches MUST be type-compatible. |
+| `coalesce` | `coalesce(T?, …) -> T?` | First non-`null` argument. |
+| `lookup` | `lookup(T, object, default?) -> U` | Map a value through a table; `default` (`null`) when absent. |
+| `to_number` / `to_integer` / `to_string` / `to_boolean` | conversion | Explicit coercion; an invalid conversion yields `null`. |
+| `abs` / `round` | `abs(number) -> number`; `round(number, digits?) -> number` | Numeric helpers. |
+| `date_diff` | `date_diff(date, date, unit) -> integer` | Whole units between dates; `unit` ∈ `days`, `weeks`, `months`, `years`. |
+
+**Typing rules**
+
+- Every call MUST match exactly one signature. Arguments MUST be assignable to parameter types, and the result MUST be assignable to its target slot or enclosing parameter (VR-26).
+- Element-scoped parameters (`map`'s selector, the predicate of `filter`/`find`/`count`/`any`/`all`/`none`, and `sort`'s key) bind `item` and `index`; their types are derived from the list argument. `item`/`index` MUST NOT appear in ordinary argument positions (VR-27).
+- `sort`, `min`, and `max` require a declared total order for the element type: `number`, `string`, `date`, or `enum` declaration order. Any other element type MUST fail validation.
+
+**Numeric semantics.** These are specified here rather than inherited from the host language, because host languages disagree and scoring correctness depends on them.
+
+- `+`, `-`, `*` are exact on integers. Integer arithmetic MUST be exact or raise a runtime error; it MUST NOT wrap silently.
+- `/` is true division returning `number`; it never truncates. Integer division and remainder are `div`/`mod`: truncating toward zero, with the remainder taking the sign of the dividend.
+- `round` is half-away-from-zero. `to_integer` truncates toward zero. `to_number` parses decimal notation only.
+- An implementation MAY satisfy exactness with arbitrary-precision or checked integers.
+
+### 5.6 Expression Extensibility
+
+The library in §5.5 is a **floor, not a ceiling**. Implementations SHOULD expose the operations their host language provides rather than waiting for this specification to enumerate them. Three tiers keep that from eroding reproducibility:
+
+| Tier | Requirement | Semantics defined by |
+|---|---|---|
+| **Core** (§5.5) | **MUST** — every conforming implementation | This specification |
+| **Extension** | **MAY** — any further pure operation the host provides | The implementation, via a declared manifest |
+| **Prohibited** | **MUST NOT** — non-deterministic, effectful, or order-dependent | — |
+
+**Rules for extensions**
+
+- **Declared, not implicit.** An implementation advertises each extension as a manifest entry: qualified name, signature in the type system of §3.2, and whether the result may be `null`. A function absent from the manifest does not exist for validation purposes, so VR-26 is unchanged in strength.
+- **Namespaced.** Extension names MUST be qualified (`py.`, `js.`, `rs.`, or a declared vendor prefix) and MUST NOT shadow a core function, another extension, or a graph predicate.
+- **Functions only, never grammar.** Extensions add functions. Operators, literals, precedence, and evaluation order are owned by this specification, and an implementation MUST NOT extend the grammar of §5.3. Every graph MUST remain parseable by every conforming tool, including tools that cannot execute it.
+- **Host types are mapped, not leaked.** Native operations SHOULD be exposed directly (`sorted`, `join`, `floor`, …) with signatures mapped into the types of §3.2. Where the host type system is richer, the implementation maps at the boundary or rejects; host-specific types MUST NOT appear in State, views, or exported values.
+- **Determinism is a precondition.** Extensions MUST be pure, deterministic, and total (or documented as partial with a `null` result). They MUST NOT perform I/O, call models, read wall-clock time or randomness, or depend on host iteration order. Operations whose host semantics are order- or locale-dependent — map iteration order, collation, casing, float formatting — MUST be normalised before exposure, or not exposed.
+- **Capability declaration.** A graph that calls an extension MUST declare it in the graph-level `capabilities` list (§6.1). Validation MUST fail when the target implementation's manifest does not advertise a compatible name and signature (VR-31). A graph that declares none is portable to every conforming implementation.
+
+**Why not simply allow every native operation.** An unbounded surface cannot be validated or documented, and host engines diverge exactly where instruments are sensitive: integer division, remainder sign, float rounding, map ordering, collation. Declared, typed extensions give implementers the reach they need while leaving a reproducible core intact. Portability becomes a checkable property of the graph/manifest pair rather than an assumption.
+
+Illustrative extensions — implementation-defined, not required: `py.split`, `py.trim`, `js.upper`, `py.contains`, `py.replace`, `py.format`, `py.group_by`, `py.zip`, `py.reduce`, `py.median`. A future revision MAY promote any of these into the core tier once two or more implementations need it with identical semantics.
 
 ---
 
@@ -779,6 +930,8 @@ graph:
   context: { ... }
   predicates: { ... }
   graph_registry: { ... }
+  views: { ... }
+  capabilities: [ ... ]
   limits:
     max_turns: 50
     max_wall_clock_s: 1800
@@ -800,6 +953,8 @@ graph:
 | `context` | no | Graph-default inline Context data (§3.6). |
 | `predicates` | no | Named predicate registry (§5.3). |
 | `graph_registry` | no | Named, version-pinned subgraph registries for dynamic dispatch (§6.2). |
+| `views` | no | Derived read-only values over State, Context, and other views (§3.8). |
+| `capabilities` | conditional | Namespaced expression extensions the graph requires (§5.6). REQUIRED if any extension is called (VR-31). |
 | `limits` | no | Turn/time/token budgets (§7.4). |
 | `seed` | no | Default session seed (§3.4). |
 | `entry` | yes | MUST reference the single `start` node. |
@@ -895,6 +1050,73 @@ Interviewer-driven navigation with completion tracking composes from existing no
 
 No worklist node is required: the sequencing policy is authorial, not structural.
 
+#### 6.5.3 Section collection and accumulation
+
+Two patterns cover "assemble a section's responses" and "build a collection whose length is discovered at runtime".
+
+**Section collection.** A section's responses are projected into a view, and derived values are expressed over that view rather than over scattered slots:
+
+```yaml
+views:
+  mdd_responses:
+    type: list<enum>
+    source: [state.mdd_q1, state.mdd_q2, state.mdd_q3]
+  mdd_score:
+    type: integer
+    expr: "count(views.mdd_responses, item == 'yes')"
+  mdd_complete:
+    type: boolean
+    expr: "count(views.mdd_responses) == len(views.mdd_responses)"
+```
+
+- `source` is the explicit sync point: the view names exactly the slots it draws from, so nothing is collected implicitly.
+- A section with heterogeneous item types uses a list of objects built with `expr` (§3.8).
+- Completion, partial reporting, and any score are views over the same list; they MUST NOT be recomputed independently in several `set` nodes.
+
+**Accumulation.** A collection whose length is not known at authoring time is built by initialising a list slot and appending inside a `foreach` body:
+
+```yaml
+- id: init_log
+  type: set
+  config: { assignments: [ { slot: attempt_log, expression: "[]" } ] }
+- id: attempts_loop
+  type: foreach
+  config:
+    over: { list_ref: state.attempt_slots }
+    body_entry: record_attempt
+    item_slot: current_attempt
+    max_iterations: 6
+- id: record_attempt
+  type: set
+  config:
+    assignments:
+      - slot: attempt_log
+        expression: "append(state.attempt_log, state.current_attempt)"
+```
+
+- `foreach` snapshots the **iteration set** at entry (§4.4, `foreach`) but not the accumulator; execution is single-threaded and ordered, so appends are deterministic.
+- Each iteration is a separate `set` execution and therefore observes the previous iteration's write. This is the only sanctioned read-modify-write pattern and it is replay-safe because every write is recorded.
+- When the iteration set is a count rather than a list, the same pattern uses a bounded `loop` with `counter_slot`.
+- A pre-populated list in state is never reordered or mutated in place; `append` returns a new value (§5.5).
+
+#### 6.5.4 Flat iteration over multiple dimensions
+
+Iteration is one-dimensional. A grid — e.g. criteria × substances — MUST be expressed as an outer `foreach` over one dimension and a `call` (or a fixed sequence of nodes) for the inner dimension:
+
+```yaml
+- id: per_drug
+  type: foreach
+  config:
+    over: { list_ref: state.drugs_endorsed }
+    body_graph: { registry: drug_modules, key: "item.key" }
+    item_slot: current_drug
+    max_iterations: 10
+```
+
+- Nested `foreach` is not part of the language (VR-32). The inner dimension is either a subgraph invoked per element or an unrolled sequence, which is acceptable because the inner set is fixed at authoring time.
+- This keeps the control-flow graph flat and every iteration bound statically visible; a nested iterator would turn the effective iteration count into a runtime product.
+- A `loop` inside a `foreach` body, or vice versa, is permitted; only `foreach` inside `foreach` is forbidden, because that is the case where the bound becomes a runtime product.
+
 ---
 
 ## 7. Execution Semantics
@@ -927,6 +1149,8 @@ When any `limits` value is exceeded, the runtime MUST terminate the current path
 
 Given the same graph version, `seed`, and user inputs, all `sample` and `classify` (deterministic backends) decisions MUST be reproducible. Because `llm`/`analyze` outputs may vary, replays SHOULD pin recorded model outputs or accept divergence while preserving recorded `sample` choices.
 
+Expressions, guards, `decide` tests, and views are pure functions of State, Context, and inputs, so they replay exactly. Because views are recomputed rather than stored, a runtime MUST record the **evaluated view values** that fed any routing decision or user-facing message, so replay never depends on re-deriving them from a different state snapshot.
+
 ---
 
 ## 8. Validation Rules
@@ -939,8 +1163,8 @@ A graph MUST pass all rules below before execution. Rules are numbered for refer
 - **VR-4** — Every edge endpoint MUST reference an existing node and an existing port on that node.
 - **VR-5** — Every node MUST be reachable from `start`.
 - **VR-6** — Every node MUST be able to reach at least one `end` node.
-- **VR-7** — Every state reference MUST resolve in `state_schema`; every write MUST be declared in `effects.write`.
-- **VR-8** — Every `ask` MUST declare a valid `input_type`, a `slot`, and a `response_schema` when `input_type: custom`. For `single_select` and `multi_select`, exactly one of `options` or `options_ref` MUST be declared, and `options_ref` MUST resolve to a list-typed state variable whose element type matches the input type.
+- **VR-7** — Every state reference MUST resolve in `state_schema`; every `views.*` reference MUST resolve to a declared view (§3.8); every write MUST be declared in `effects.write`. `item` and `index` MUST appear only in element-scoped positions (§5.3).
+- **VR-8** — Every `ask` MUST declare a valid `input_type`, a `slot`, and a `response_schema` when `input_type: custom`. For `single_select` and `multi_select`, exactly one of `options` or `options_ref` MUST be declared, and `options_ref` MUST resolve to a list-typed state variable or view whose element type matches the input type.
 - **VR-9** — Every `branch` MUST have a `default` edge or provably exhaustive guards.
 - **VR-10** — Unguarded cycles are forbidden; every cycle MUST pass through a `loop` node or a terminating guarded edge.
 - **VR-11** — `fork`/`join` MUST be balanced; forked streams MUST be entirely non-blocking; the graph MUST satisfy the single-await invariant (§6.4). A `foreach` whose body can await `user` MUST NOT appear in a forked stream.
@@ -952,12 +1176,19 @@ A graph MUST pass all rules below before execution. Rules are numbered for refer
 - **VR-17** — Every `fetch.source_ref` MUST reference a declared data source, and every requested attribute MUST exist in that source's schema.
 - **VR-18** — Context (`context.*`) is read-only: no node or `set` MAY write it, and every `context.*` reference MUST resolve in the supplied Context or `context_schema`.
 - **VR-19** — Credentials MUST be referenced via `credentials_ref`; inline secrets in graph, config, or context are forbidden.
-- **VR-20** — Every `decide` operand MUST resolve in `state_schema`; all operands MUST share a type; `test.cmp` MUST be legal for the operand type and MUST carry the parameters that `cmp` requires; `n_of_k` MUST declare a positive `k`; exactly one of `true`/`false`/`unknown` MUST be taken per evaluation.
+- **VR-20** — Every `decide` operand MUST resolve in `state_schema` or `views`; all operands MUST share a type; `test.cmp` MUST be legal for the operand type and MUST carry the parameters that `cmp` requires; `n_of_k` MUST declare a positive `k`; exactly one of `true`/`false`/`unknown` MUST be taken per evaluation.
 - **VR-21** — Every cross-session read MUST name a declared `session.links` entry; the source MUST be a `session_store` with `access: read_only`; every requested attribute MUST be exported by the linked session.
 - **VR-22** — Every dynamic `graph_ref` MUST resolve through a declared `graph_registry`; every registry entry MUST be version-pinned; no other dynamic subgraph resolution is permitted.
-- **VR-23** — Every `foreach` MUST iterate a declared list-typed variable or a registry projection; `filter`/`order_by`/`tiebreak`/`body_graph` expressions MUST type-check against the element type; `max_iterations` MUST be declared; ordering MUST be total.
+- **VR-23** — Every `foreach` MUST iterate a declared list-typed variable, a declared view, or a registry projection; `filter`/`order_by`/`tiebreak`/`body_graph` expressions MUST type-check against the element type; `max_iterations` MUST be declared; ordering MUST be total.
 - **VR-24** — No node may perform more than one user exchange (P8); any `loop` whose `exit_when` references a model-written variable MUST declare `max_iterations`.
 - **VR-25** — Sessions in a case MUST declare `case_id` and `role`; `links` MUST be acyclic; `export.attributes` MUST be typed.
+- **VR-26** — Every call MUST match a declared signature — a core function (§5.5) or, for a namespaced extension, an entry in the implementation manifest (§5.6) — with arguments assignable to parameter types and a result assignable to its target slot or enclosing parameter. Core and extension names are reserved and MUST NOT be redeclared as predicates.
+- **VR-27** — `item` and `index` MUST appear only in element-scoped positions (`decide.test.predicate`, `foreach.filter`/`order_by`/`tiebreak`/`body_graph`, and the element-scoped argument of `map`/`filter`/`find`/`count`/`any`/`all`/`none`/`sort`), and MUST type-check against the element type derived from the list argument.
+- **VR-28** — `set` assignments MUST be evaluated simultaneously against pre-node state and applied atomically; each expression MUST type-check against its slot; empty list/object literals MUST be contextually typed; no assignment MAY depend on another assignment in the same node.
+- **VR-29** — Every view MUST declare `type` and exactly one of `source`/`expr`; all references MUST resolve; `expr` MUST type-check to `type`; the view dependency graph MUST be acyclic; no node MAY write a view.
+- **VR-30** — Every `views.*` reference MUST resolve to a declared view; view dependencies MUST resolve transitively to `state_schema` or `context_schema`. A node that reads a view in its own config MUST declare it in `effects.read`. Edge guards and `loop.exit_when` MUST resolve but need not repeat their references in `effects.read`, exactly as for `state.*` under VR-7.
+- **VR-31** — A graph calling an extension MUST declare it in `capabilities`; validation MUST fail when the target implementation's manifest does not advertise a compatible name and signature. Extension names MUST be namespaced and MUST NOT shadow core functions, other extensions, or graph predicates.
+- **VR-32** — A `foreach` MUST NOT appear in the body of another `foreach` within the same graph. Multi-dimensional iteration MUST cross a `call` boundary (§6.5.4).
 
 ---
 
@@ -988,7 +1219,7 @@ await: none
 - A custom node MUST define **what to do with the returned payload**: which slot receives it, whether it is validated against a schema, and what happens on invalid output.
 - Adapters MAY normalize external protocols (including MCP) to this contract, but this specification does not mandate a transport.
 
-This section intentionally does not define a full plugin ABI, sandboxing model, or capability negotiation; those are deferred (§11).
+This section intentionally does not define a full plugin ABI, sandboxing model, or node-level capability negotiation; those are deferred (§11). Expression-level capabilities are separate and are defined in §5.6: an implementation declares the pure functions it provides, a graph declares the ones it requires, and validation checks the two against each other.
 
 ---
 
@@ -1322,12 +1553,95 @@ graph:
 
 Validation: passes VR-1…VR-25. The cycle passes through a `loop` (VR-10); the exit depends on a model-written flag, so `max_iterations` is REQUIRED (VR-24). Each probe turn is a distinct turn (§3.3), separately transcribed and budgeted.
 
+### 10.8 Derived Views, Section Scoring, and Accumulation
+
+Demonstrates `views` (§3.8), aggregates and constructors (§5.5), atomic `set` (§4.5), and the accumulation pattern (§6.5.3). A three-item mood section is scored, gated, summarised, and supplemented by a runtime-sized attempt log.
+
+```yaml
+graph:
+  id: mood_screen
+  version: 0.1.0
+  state_schema:
+    mdd_q1: { type: enum, values: [no, yes, unk], scope: session, mutable: true }
+    mdd_q2: { type: enum, values: [no, yes, unk], scope: session, mutable: true }
+    mdd_q3: { type: enum, values: [no, yes, unk], scope: session, mutable: true }
+    severity: { type: integer, scope: session, mutable: true }
+    attempt_slots: { type: list<integer>, scope: session, mutable: true }
+    current_attempt: { type: integer, scope: session, mutable: true }
+    attempt_log: { type: list<integer>, scope: session, mutable: true }
+    summary: { type: string, scope: session, mutable: true }
+  views:
+    mdd_responses:
+      type: list<enum>
+      source: [state.mdd_q1, state.mdd_q2, state.mdd_q3]
+    mdd_score:
+      type: integer
+      expr: "count(views.mdd_responses, item == 'yes')"
+    mdd_flagged:
+      type: boolean
+      expr: "views.mdd_score >= 2"
+    mdd_complete:
+      type: boolean
+      expr: "count(views.mdd_responses) == len(views.mdd_responses)"
+    weighted_severity:
+      type: integer
+      expr: "sum(map(views.mdd_responses, lookup(item, {no: 0, unk: 1, yes: 2}, 0)))"
+  entry: start
+  on_error: end_abandoned
+  nodes:
+    - { id: start, type: start }
+    - { id: q1, type: ask, effects: { write: [mdd_q1] }, config: { prompt: "Little interest or pleasure?", input_type: single_select, options: [no, yes, unk], slot: mdd_q1 } }
+    - { id: q2, type: ask, effects: { write: [mdd_q2] }, config: { prompt: "Feeling down or hopeless?", input_type: single_select, options: [no, yes, unk], slot: mdd_q2 } }
+    - { id: q3, type: ask, effects: { write: [mdd_q3] }, config: { prompt: "Trouble sleeping?", input_type: single_select, options: [no, yes, unk], slot: mdd_q3 } }
+    - id: score
+      type: set
+      effects: { read: [weighted_severity, mdd_responses], write: [severity, summary] }
+      config:
+        assignments:
+          - { slot: severity, expression: "views.weighted_severity" }
+          - { slot: summary, expression: "join(map(views.mdd_responses, to_string(item)), ', ')" }
+    - id: gate
+      type: branch
+    - { id: init_log, type: set, effects: { write: [attempt_log] }, config: { assignments: [ { slot: attempt_log, expression: "[]" } ] } }
+    - id: log_loop
+      type: foreach
+      effects: { write: [current_attempt] }
+      config:
+        over: { list_ref: state.attempt_slots }
+        body_entry: record_attempt
+        item_slot: current_attempt
+        max_iterations: 6
+    - id: record_attempt
+      type: set
+      effects: { write: [attempt_log] }
+      config:
+        assignments:
+          - { slot: attempt_log, expression: "append(state.attempt_log, state.current_attempt)" }
+    - { id: done, type: end, config: { outcome: completed } }
+    - { id: end_abandoned, type: end, config: { outcome: abandoned } }
+  edges:
+    - { from: start,  to: q1, type: next }
+    - { from: q1,     to: q2, type: next }
+    - { from: q2,     to: q3, type: next }
+    - { from: q3,     to: score, type: next }
+    - { from: score,  to: gate, type: next }
+    - { from: gate, to: init_log, type: conditional, when: "views.mdd_flagged", priority: 1 }
+    - { from: gate, to: done, type: default }
+    - { from: init_log,    to: log_loop, type: next }
+    - { from: log_loop,    port: body, to: record_attempt, type: next }
+    - { from: record_attempt, to: log_loop, type: next }
+    - { from: log_loop,    port: exit, to: done, type: next }
+  terminals: [done, end_abandoned]
+```
+
+Validation: passes VR-1…VR-32. `mdd_responses` names its sources explicitly, so nothing is collected implicitly. `mdd_score` and `mdd_complete` are pure functions of that one view; `weighted_severity` shows `lookup` as an enum→number table composed inside `map`. The `score` node reads two views in its config and declares both in `effects.read` (VR-30). Its two assignments are evaluated against pre-node state and applied atomically (VR-28). `record_attempt` reads and appends its own slot; this is legal because each iteration is a separate `set` execution (§6.5.3). `views.mdd_flagged` is read only by an edge guard, so it must resolve but needs no `effects.read` entry.
+
 ---
 
 ## 11. Open Issues
 
 - **Serialization**: JSON, YAML, or a binary schema; canonical form and schema language.
-- **Guard grammar finalization**: precedence edge cases, type coercion, and a standard predicate library.
+- **Guard grammar finalization**: precedence edge cases and type-coercion corner cases. The standard function library is now specified (§5.5); this item is narrowed accordingly.
 - **Custom-node ABI**: full contract, sandboxing, capability negotiation, and whether to standardize on MCP as the transport adapter.
 - **Multi-await forks**: whether to ever permit concurrent blocking user turns (currently forbidden by P5/VR-11).
 - **Randomization breadth**: node-level `sample` is chosen for v1; revisit whether edge-level weights or deterministic assignment strategies (quota, A/B bucketing) are needed.
@@ -1340,8 +1654,12 @@ Validation: passes VR-1…VR-25. The cycle passes through a `loop` (VR-10); the 
 - **Testing harness**: conformance suite, deterministic replay tooling, and simulation of user inputs.
 - **Decision-node consolidation**: whether `decide` should absorb `branch` into a single decision primitive with an optional `operands` block, or remain complementary.
 - **Missing-value sentinels**: whether state variables should declare sentinel values (e.g. `0` meaning "no information") so `on_missing` can detect them without repeating node-level policy.
-- **Collection construction**: `set` has no append/collect operators; worklists currently rely on registry projections and list-typed state supplied at session start.
+- **Expression extensions**: where an implementation publishes its manifest of extension signatures (an out-of-band conformance profile, or a machine-readable file the validator loads), and whether a graph's `capabilities` list should stay explicit or be inferred from use.
 - **Session stores**: retention, redaction, snapshot-vs-live reads of an active linked session, and whether exports are frozen at session end. Replay requires the observed snapshot to be recorded.
-- **Nested iteration**: whether 2-D grids (e.g. relatives × conditions) should use nested `foreach` or require a `call` per dimension.
+- **Nested iteration**: 2-D grids are expressed as an outer `foreach` plus a `call` per dimension, and nested `foreach` is forbidden (VR-32, §6.5.4). Revisit only if an instrument cannot be expressed that way.
+- **Core-tier promotion**: the bar for moving an extension into §5.5 — proposed: two independent implementations with identical semantics, used by at least two instruments.
+- **Numeric edge semantics**: `/`, `div`, `mod`, `round`, and overflow behaviour are fixed in §5.5 so scores are reproducible. Confirm these choices before independent implementations diverge.
+- **`index` binding scope**: `index` is the position in the source list, i.e. pre-`filter` for a `filter` predicate. Confirm no other interpretation is intended.
+- **View export**: whether derived views may be exported to linked sessions (§3.7). Deferred, because exporting a recomputed value requires a snapshot rule that does not yet exist.
 - **Session role typing**: whether `session.role` should be a closed enum or remain a namespaced string.
 - **Turn audit fields**: whether turn records should carry session role or responder identity.

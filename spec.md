@@ -5,9 +5,11 @@
 | Field | Value |
 |---|---|
 | Status | Draft |
-| Version | 0.4.0 |
+| Version | 0.5.0 |
 | Audience | Spec authors, runtime implementers, conversation designers |
 | Scope | Conceptual node taxonomy and graph semantics (format-agnostic) |
+
+**Revision notes (0.5.0).** Additive revision driven by the MoBI compliance evaluation ([`evaluations/mobi/mobi-compliance.md`](evaluations/mobi/mobi-compliance.md)) and the remediation proposal ([`evaluations/mobi/proposal-v0.5.0-llm-interface-and-assignment.md`](evaluations/mobi/proposal-v0.5.0-llm-interface-and-assignment.md)). Changes: the `session.*` expression root and `session.seed` access (§3.1, §3.4, §5.3); core functions `range`, `shuffle`, `take`, `chunks`, `div`, `mod` and refined `get` overloads (§5.5); `llm.messages`, `llm.history`, and `llm.message_slot` (§4.3); conversation scope and prompt-assembly rules (§7.1); the subgraph termination contract and reserved `outcome` output (§4.4, §6.2); validation rules VR-33–VR-36 and an amendment to VR-7. No node type was added. One behaviour is newly defined where v0.4.0 was silent: a `conversational` `llm` now sees prior turns in its conversation scope by default (§4.3, §7.1).
 
 **Revision notes (0.4.0).** Additive revision driven by the DASH compliance evaluation ([`evaluations/dash/dash-compliance.md`](evaluations/dash/dash-compliance.md)) and the remediation proposal ([`evaluations/dash/proposal-v0.4.0-expressions-and-views.md`](evaluations/dash/proposal-v0.4.0-expressions-and-views.md)). Changes: typed expression library with collection/object constructors and aggregates (§5.5); expression extensibility tiers — a mandated core plus declared implementation extensions (§5.6); `set` widened to any type with atomic simultaneous assignment (§4.5); derived read-only `views` (§3.8) and the `views.*` namespace; canonical collection/accumulation patterns (§6.5.3); validation rules VR-26–VR-31 and amendments to VR-7/8/20/23. No node type was added and no v0.3.0 construct changed meaning.
 
@@ -52,6 +54,7 @@ This specification defines the primitive **node types** from which arbitrary con
 - Support multi-session cases in which informant-specific sessions exchange declared, read-only data.
 - Support declarative decision logic over typed state operands and runtime-ordered dispatch of reusable subgraphs.
 - Support declarative computation over collections — aggregates, constructors, and named derived views — so scores, counts, and summaries are inspectable values rather than out-of-band code.
+- Support experimental designs as graphs: balanced assignment, without-replacement sampling, and reproducible ordering are declared values derived from the session seed, not pre-computed outside the graph.
 
 **Non-Goals**
 
@@ -104,6 +107,8 @@ A **session** is one execution of a graph for one participant. A session MUST ha
 A session MAY be paused and resumed. On resume, `seed`, `state`, and `context` MUST be preserved.
 
 `case_id`, `role`, `links`, and `export` are REQUIRED only for sessions participating in a multi-session case. A standalone session MAY omit them. Sessions are independent executions: one session MUST NOT await, sequence, retry, or terminate another. Case-level orchestration is out of scope (§1).
+
+**Session references.** The scalar session fields `seed`, `id`, `case_id`, and `role` are readable in expressions as `session.<field>` (§5.3). They are read-only: no node MAY write one (VR-33). The non-scalar fields — `state`, `context`, `links`, `export`, `data_sources`, `transcript`, `status` — MUST NOT be referenced this way; each is reachable through its own mechanism.
 
 ### 3.2 State
 
@@ -163,6 +168,7 @@ All randomized decisions are governed by `session.seed`. Given the same graph, s
 - A `sample` node MUST derive its randomness deterministically from `seed` and its own node id.
 - The realized choice MUST be written to state so a run can be replayed or audited.
 - To **fix** a random sample, a caller MUST either pin `seed` or pre-populate the sample node's recorded-choice slot.
+- The seed is readable in expressions as `session.seed` (§3.1, §5.3), so a graph can derive its own randomized assignment rather than receiving one as Context. Functions that consume it (`shuffle`, §5.5) remain pure functions of their arguments.
 - Model outputs are explicitly **out of scope** for determinism guarantees, but their state effects MUST still be declared.
 
 ### 3.5 Data Sources
@@ -425,19 +431,25 @@ Model-backed nodes MUST declare `effects.write` and MUST record enough provenanc
 |---|---|---|
 | `model` | yes | Model identifier. |
 | `mode` | yes | `conversational` or `silent`. |
-| `prompt_template` | yes | Template with state/context interpolation. |
+| `messages` | conditional | Ordered list of `{role, template}`; `role` ∈ `system`, `user`, `assistant`. Exactly one of `messages` or `prompt_template` MUST be declared. |
+| `prompt_template` | conditional | Sugar for a single `user` message: `prompt_template: T` is exactly `messages: [{role: user, template: T}]`. |
+| `history` | no | Conversation scope for the assembled prompt: `all` (default), `none`, `{last: N}`, or `{from: [...]}` (§7.1). |
 | `output_schema` | no | If set, output MUST validate against it. |
-| `slot` | yes | State variable receiving the output. |
+| `slot` | yes | State variable receiving the validated reply (`conversational`) or the model output (`silent`). |
+| `message_slot` | no | `string` state variable receiving the message emitted to the user. `conversational` only; MUST differ from `slot`. |
 | `tools` | no | Tool references available to the model. |
 | `temperature`, `max_tokens` | no | Generation parameters. |
 | `timeout_s` | no | Timeout before firing the `timeout` edge. |
 
-- **Effects**: writes `slot`.
+- **Effects**: writes `slot` and, when declared, `message_slot`.
 - **Await**: `user` when `mode: conversational`; `none` when `mode: silent`.
 - **Requirements**:
   - In `conversational` mode the node MUST emit exactly one user-facing message and await exactly one reply (P8), writing the validated reply to `slot`. It MUST NOT conduct further exchanges internally and MUST NOT hold an internal turn budget.
   - In `silent` mode the node MUST NOT produce a user-facing turn and MUST NOT block.
   - When `output_schema` is present, output MUST validate before writing; on failure the `error` edge MUST be taken.
+  - `messages` MUST contain at least one entry, and at least one entry MUST have role `user` or `assistant`. Every `system` message MUST precede every non-system message (VR-34).
+  - The prompt is assembled in a fixed order: leading `system` messages, then the `history` block (§7.1), then the remaining messages in declaration order. This is why `system` messages MUST be leading.
+  - When `message_slot` is declared, the node MUST write the exact text it emitted, so a later node can inspect it. `slot` continues to receive the participant's reply.
   - The runtime MUST record model id, prompt hash, and output for every invocation.
 
 #### `analyze`
@@ -651,6 +663,7 @@ config:
   - A registry-based `graph_ref` MUST resolve to a key in the named registry; resolution failure MUST take the `error` edge.
   - In `isolated` mode the child MUST NOT read or write parent state except through `input_map`/`output_map`.
   - Subgraph errors MUST propagate to the caller's `error` edge.
+  - A subgraph `end` MUST conclude the subgraph and return control through this node's `out` port; it MUST NOT terminate the parent session. The terminal `outcome` is exposed as the reserved output `outcome` and MAY be bound through `output_map` (§6.2, VR-36).
   - A `call` that can await `user` MUST NOT be placed in a forked silent stream.
 
 ### 4.5 State Family
@@ -807,7 +820,8 @@ factor         = number | string | boolean | "null"
                | "(" , expr , ")" ;
 ref            = "state." , identifier , { "." , identifier }
                | "context." , identifier , { "." , identifier }
-               | "views." , identifier ;
+               | "views." , identifier
+               | "session." , identifier ;
 local_ref      = ( "item" | "index" ) , { "." , identifier } ;
 call           = name , "(" , [ expr , { "," , expr } ] , ")" ;
 name           = identifier , { "." , identifier } ;
@@ -816,7 +830,9 @@ object_literal = "{" , [ obj_entry , { "," , obj_entry } ] , "}" ;
 obj_entry      = ( identifier | string ) , ":" , expr ;
 ```
 
-`call` resolves to one of three things, in this order: a core function (§5.5), a namespaced implementation extension (§5.6), or a named predicate declared in the graph's `predicates` registry. A call name MUST NOT begin with the reserved roots `state`, `context`, or `views`. Core and extension names are reserved; a predicate MUST NOT shadow them (VR-26).
+`call` resolves to one of three things, in this order: a core function (§5.5), a namespaced implementation extension (§5.6), or a named predicate declared in the graph's `predicates` registry. A call name MUST NOT begin with the reserved roots `state`, `context`, `views`, or `session`. Core and extension names are reserved; a predicate MUST NOT shadow them (VR-26).
+
+`session.<field>` names a scalar session field (§3.1): `seed`, `id`, `case_id`, or `role`. It is a read-only reference, resolvable wherever a `state.*` reference is legal, and it MUST NOT be written (VR-33). Because the seed is an ordinary operand, functions that consume it stay pure (§5.5).
 
 `local_ref` (`item`, `index`) is legal **only** in element-scoped positions: `decide.test.predicate`, `foreach.filter`/`order_by`/`tiebreak`/`body_graph`, and the element-scoped argument of `map`/`filter`/`find`/`count`/`any`/`all`/`none`/`sort`. In those positions `item` binds the current element and `index` its zero-based position in the source list. Their types are derived from the list argument. `item` and `index` MUST NOT appear in edge guards, `set` expressions, or `loop.exit_when`, which have no iteration binding (VR-27).
 
@@ -863,11 +879,15 @@ These functions are the **conformance minimum**: every implementation MUST provi
 | `flatten` | `flatten(list<list<T>>) -> list<T>` | One level of flattening. |
 | `distinct` | `distinct(list<T>) -> list<T>` | Deduplicate, keeping first-occurrence order. |
 | `slice` | `slice(list<T>\|string, start, end?) -> same` | Half-open range; `end` defaults to length. |
+| `range` | `range(end) -> list<integer>`; `range(start, end, step?) -> list<integer>` | Half-open integer range; `step` defaults to `1` and MUST be non-zero; negative steps count down. |
+| `take` | `take(list<T>\|string, n) -> same` | The first `n` elements; `n` is clamped to `[0, len]`. |
+| `chunks` | `chunks(list<T>, size) -> list<list<T>>` | Consecutive blocks of `size`; the last block MAY be short; `size` MUST be ≥ 1. |
+| `shuffle` | `shuffle(list<T>, seed) -> list<T>` | Deterministic permutation. Same list and seed MUST yield the same order within an implementation. |
 | `sort` | `sort(list<T>, key?, descending?) -> list<T>` | Stable sort under a total order; `key` is element-scoped. |
 | `reverse` | `reverse(list<T>\|string) -> same` | Reverse order. |
 | `merge` | `merge(object, …) -> object` | Shallow merge; later keys win. |
 | `keys` / `values` | `keys(object) -> list<string>`; `values(object) -> list<any>` | Keys / values in insertion order. |
-| `get` | `get(object\|list, key\|index, default?) -> any` | Value at key/index, else `default` (`null`). |
+| `get` | `get(list<T>, integer, T?) -> T`; `get(object, string, any?) -> any` | Value at index/key, else `default` (`null`). |
 | `put` | `put(object, key, value) -> object` | Immutable insert or overwrite. |
 | `has` | `has(object, key) -> boolean` | Key presence. |
 | `join` | `join(list<string>, separator) -> string` | Join; `null` elements become empty strings. |
@@ -876,7 +896,10 @@ These functions are the **conformance minimum**: every implementation MUST provi
 | `lookup` | `lookup(T, object, default?) -> U` | Map a value through a table; `default` (`null`) when absent. |
 | `to_number` / `to_integer` / `to_string` / `to_boolean` | conversion | Explicit coercion; an invalid conversion yields `null`. |
 | `abs` / `round` | `abs(number) -> number`; `round(number, digits?) -> number` | Numeric helpers. |
+| `div` / `mod` | `div(integer, integer) -> integer`; `mod(integer, integer) -> integer` | Truncating division and remainder, with the semantics below. |
 | `date_diff` | `date_diff(date, date, unit) -> integer` | Whole units between dates; `unit` ∈ `days`, `weeks`, `months`, `years`. |
+
+**Permutation determinism.** `shuffle` is deterministic within an implementation: the same list and seed MUST yield the same order, and the result MUST NOT depend on the host RNG, host hash ordering, locale, or wall-clock time. This specification does not pin an algorithm, so two conforming implementations MAY produce different permutations for the same seed — the same treatment `sample` receives (§3.4). A graph that depends on a specific permutation MUST write the result to state, which is then the authoritative record for replay and analysis (§7.5).
 
 **Typing rules**
 
@@ -965,6 +988,8 @@ graph:
 ### 6.2 Subgraphs
 
 A `call` node composes graphs. The subgraph MUST expose declared inputs/outputs, and the caller MUST map them via `input_map`/`output_map`. Subgraph state is isolated unless `state_isolation: shared`. Subgraphs MUST be version-pinned so graphs remain reproducible.
+
+**Termination contract.** A subgraph `end` concludes **the subgraph** and returns control to the caller through the `call` node's `out` port; it MUST NOT terminate the parent session. Every subgraph therefore exposes one reserved output, `outcome`, whose value is the `outcome` of the `end` that terminated it, and a subgraph MUST NOT declare an output of that name. `output_map` MAY bind `outcome` like any other output, to a declared `enum` or `string` state variable (VR-36). A subgraph that ends via `on_error` takes the caller's `error` port instead, and `outcome` is not bound.
 
 **Dynamic dispatch.** A `call.graph_ref` MAY be selected at runtime, but only through a declared `graph_registry`. Dynamic references resolve **only** through a registry; there is no runtime graph lookup by id. This keeps every possible dispatch target enumerable from the graph source (P4) and version-pinned (VR-13, VR-22).
 
@@ -1129,6 +1154,19 @@ Iteration is one-dimensional. A grid — e.g. criteria × substances — MUST be
 - `await: external` nodes suspend until the external event or timeout.
 - Silent nodes executed between turns are attributed to the upcoming turn's record.
 
+**Conversation scope.** The **visible conversation scope** of a node is the set of prior interactions it can see, and `call.state_isolation` (§4.4) sets it. In `shared` mode the scope is the whole session; in `isolated` mode it is the subgraph's own execution, so a child cannot see parent turns any more than it can read parent state. This is what keeps one trial's chat out of the next.
+
+**History assembly.** An `llm` assembles its prompt as: leading `system` messages, then the block selected by `history`, then the remaining messages in declaration order (§4.3). `history` takes one of four shapes:
+
+| Shape | Meaning |
+|---|---|
+| `all` (default) | Every prior interaction in the visible scope, in order. |
+| `none` | No history. |
+| `{last: N}` | The last `N` interactions in scope. `N` MUST be a non-negative integer; `0` is equivalent to `none`. |
+| `{from: [...]}` | The listed `{role, template}` entries, in the given order. |
+
+`last` and `from` MAY be combined; `from` entries render first, then the selected interactions. An **interaction** is one user-facing exchange — the participant's message and the reply that followed — matching the transcript's unit (§3.1). Each rendered interaction becomes one `user` message (the participant's text) followed by one `assistant` message (the generated text). Arbitrary state is not serialized into the prompt by default, because there is no canonical rendering for nested values; an author who wants a specific value in the prompt declares it with `from`, which reuses the template mechanism (§3.2).
+
 ### 7.2 Awaiting and Silence
 
 - A `say` or `llm` in `silent` mode MUST NOT suspend.
@@ -1151,6 +1189,8 @@ Given the same graph version, `seed`, and user inputs, all `sample` and `classif
 
 Expressions, guards, `decide` tests, and views are pure functions of State, Context, and inputs, so they replay exactly. Because views are recomputed rather than stored, a runtime MUST record the **evaluated view values** that fed any routing decision or user-facing message, so replay never depends on re-deriving them from a different state snapshot.
 
+The same rule covers assembled prompts: because `history` is assembled from recorded interactions and recorded state, a runtime MUST record the **assembled prompt** (or its hash plus the inputs it was built from) for every `llm` invocation. A replay MUST NOT reconstruct a prompt from a different state snapshot than the one the model actually saw.
+
 ---
 
 ## 8. Validation Rules
@@ -1163,7 +1203,7 @@ A graph MUST pass all rules below before execution. Rules are numbered for refer
 - **VR-4** — Every edge endpoint MUST reference an existing node and an existing port on that node.
 - **VR-5** — Every node MUST be reachable from `start`.
 - **VR-6** — Every node MUST be able to reach at least one `end` node.
-- **VR-7** — Every state reference MUST resolve in `state_schema`; every `views.*` reference MUST resolve to a declared view (§3.8); every write MUST be declared in `effects.write`. `item` and `index` MUST appear only in element-scoped positions (§5.3).
+- **VR-7** — Every state reference MUST resolve in `state_schema`; every `views.*` reference MUST resolve to a declared view (§3.8); every `session.*` reference MUST name a scalar session field (§3.1) and MUST NOT be written (VR-33); every write MUST be declared in `effects.write`. `item` and `index` MUST appear only in element-scoped positions (§5.3).
 - **VR-8** — Every `ask` MUST declare a valid `input_type`, a `slot`, and a `response_schema` when `input_type: custom`. For `single_select` and `multi_select`, exactly one of `options` or `options_ref` MUST be declared, and `options_ref` MUST resolve to a list-typed state variable or view whose element type matches the input type.
 - **VR-9** — Every `branch` MUST have a `default` edge or provably exhaustive guards.
 - **VR-10** — Unguarded cycles are forbidden; every cycle MUST pass through a `loop` node or a terminating guarded edge.
@@ -1189,6 +1229,10 @@ A graph MUST pass all rules below before execution. Rules are numbered for refer
 - **VR-30** — Every `views.*` reference MUST resolve to a declared view; view dependencies MUST resolve transitively to `state_schema` or `context_schema`. A node that reads a view in its own config MUST declare it in `effects.read`. Edge guards and `loop.exit_when` MUST resolve but need not repeat their references in `effects.read`, exactly as for `state.*` under VR-7.
 - **VR-31** — A graph calling an extension MUST declare it in `capabilities`; validation MUST fail when the target implementation's manifest does not advertise a compatible name and signature. Extension names MUST be namespaced and MUST NOT shadow core functions, other extensions, or graph predicates.
 - **VR-32** — A `foreach` MUST NOT appear in the body of another `foreach` within the same graph. Multi-dimensional iteration MUST cross a `call` boundary (§6.5.4).
+- **VR-33** — Every `session.*` reference MUST name a scalar field of the session record (§3.1); no node, `set`, or view MAY write one; `session` MUST NOT be redeclared as a predicate or extension name.
+- **VR-34** — An `llm` MUST declare exactly one of `prompt_template` or `messages`; `messages` MUST contain at least one entry, at least one of which has role `user` or `assistant`; every `role` MUST be `system`, `user`, or `assistant`; every `system` message MUST precede every non-system message; every template MUST resolve.
+- **VR-35** — `llm.history` MUST be `all`, `none`, `{last: N}` with `N` a non-negative integer, or `{from: [...]}` of `{role, template}` entries; every `from` reference MUST resolve in the node's visible conversation scope (§7.1); `message_slot` MUST be a declared `string` state variable, MUST differ from `slot`, MUST be declared in `effects.write`, and MUST NOT appear when `mode: silent`.
+- **VR-36** — Every subgraph exposes a reserved `outcome` output and MUST NOT declare an output of that name; a subgraph `end` MUST return control through the caller's `out`; an `output_map` binding for `outcome` MUST target a declared `enum` or `string` state variable (§6.2).
 
 ---
 
@@ -1636,6 +1680,120 @@ graph:
 
 Validation: passes VR-1…VR-32. `mdd_responses` names its sources explicitly, so nothing is collected implicitly. `mdd_score` and `mdd_complete` are pure functions of that one view; `weighted_severity` shows `lookup` as an enum→number table composed inside `map`. The `score` node reads two views in its config and declares both in `effects.read` (VR-30). Its two assignments are evaluated against pre-node state and applied atomically (VR-28). `record_attempt` reads and appends its own slot; this is legal because each iteration is a separate `set` execution (§6.5.3). `views.mdd_flagged` is read only by an edge guard, so it must resolve but needs no `effects.read` entry.
 
+### 10.9 Design Assignment, Composed Prompts, and Subgraph Outcome
+
+Demonstrates `session.seed` with `range`/`shuffle` (§5.5), `llm.messages` and `llm.history` (§4.3), `message_slot` for inspecting generated text, and the subgraph termination contract (§6.2).
+
+The trial subgraph emits two bot replies, inspects the first for a crisis rule, and can end early with a different `outcome`:
+
+```yaml
+graph:
+  id: mobi_trial
+  version: 0.1.0
+  entry: start
+  on_error: abandoned
+  state_schema:
+    story_text:           { type: string,  scope: session, mutable: true }
+    stance_instruction:   { type: string,  scope: session, mutable: true }
+    question_instruction: { type: string,  scope: session, mutable: true }
+    choice_pre:           { type: enum, values: [option_a, option_b], scope: session, mutable: true }
+    certainty_pre:        { type: integer, scope: session, mutable: true }
+    justification:        { type: string,  scope: session, mutable: true }
+    bot_reply_1:          { type: string,  scope: session, mutable: true }
+    reply_1:              { type: string,  scope: session, mutable: true }
+    crisis_label:         { type: enum, values: [safe, crisis], scope: session, mutable: true }
+    bot_reply_2:          { type: string,  scope: session, mutable: true }
+    reply_2:              { type: string,  scope: session, mutable: true }
+  nodes:
+    - { id: start, type: start }
+    - id: bot_1
+      type: llm
+      effects: { write: [bot_reply_1, reply_1] }
+      config:
+        model: m1
+        mode: conversational
+        messages:
+          - { role: system, template: "{{ context.base_system }}" }
+          - { role: system, template: "{{ state.stance_instruction }}" }
+          - { role: system, template: "{{ state.question_instruction }}" }
+          - { role: user,   template: "{{ state.story_text }}" }
+        history:
+          from:
+            - { role: user, template: "Initial choice: {{ state.choice_pre }} (certainty {{ state.certainty_pre }})" }
+            - { role: user, template: "My reason: {{ state.justification }}" }
+        message_slot: bot_reply_1
+        slot: reply_1
+    - id: crisis_check
+      type: classify
+      effects: { read: [bot_reply_1], write: [crisis_label] }
+      config:
+        backend: rules
+        model: crisis_rules
+        inputs: [state.bot_reply_1]
+        labels: [safe, crisis]
+        slot: crisis_label
+    - id: crisis_gate
+      type: branch
+    - id: bot_2
+      type: llm
+      effects: { write: [bot_reply_2, reply_2] }
+      config:
+        model: m1
+        mode: conversational
+        messages:
+          - { role: system, template: "{{ context.base_system }}" }
+          - { role: system, template: "{{ state.stance_instruction }}" }
+        history: all
+        message_slot: bot_reply_2
+        slot: reply_2
+    - { id: closing,    type: say, config: { message: "{{ context.trial_close_text }}" } }
+    - { id: done,       type: end, config: { outcome: completed } }
+    - { id: crisis_end, type: end, config: { outcome: escalated } }
+    - { id: abandoned,  type: end, config: { outcome: abandoned } }
+  edges:
+    - { from: start,       to: bot_1,       type: next }
+    - { from: bot_1,       to: crisis_check, type: next }
+    - { from: crisis_check, to: crisis_gate, type: next }
+    - { from: crisis_gate, to: crisis_end,  type: conditional, when: "state.crisis_label == 'crisis'", priority: 1 }
+    - { from: crisis_gate, to: bot_2,       type: default }
+    - { from: bot_2,       to: closing,     type: next }
+    - { from: closing,     to: done,        type: next }
+  terminals: [done, crisis_end, abandoned]
+```
+
+The caller fragment derives a block-balanced assignment from the session seed and binds the trial's terminal outcome:
+
+```yaml
+- id: build_assignment
+  type: set
+  effects: { write: [assignment] }
+  config:
+    assignments:
+      - slot: assignment
+        expression: "flatten(map(range(state.reps), shuffle(state.cells, session.seed + index)))"
+- id: trials
+  type: foreach
+  effects: { write: [current_cell] }
+  config:
+    over: { list_ref: state.assignment }
+    body_entry: run_trial
+    item_slot: current_cell
+    max_iterations: 40
+- id: run_trial
+  type: call
+  effects: { write: [trial_outcome] }
+  config:
+    graph_ref: { id: mobi_trial, version: 0.1.0 }
+    state_isolation: isolated
+    input_map:
+      story_text: state.current_cell.story_text
+      stance_instruction: state.current_cell.stance_instruction
+    output_map:
+      outcome: state.trial_outcome
+```
+
+Validation: the trial graph passes VR-1…VR-36; the caller fragment is shown without its enclosing state declarations. `bot_1` declares leading `system` messages and a `from` history block, so the assembled prompt is system instructions, then the two recorded values, then the story (VR-34). `bot_2` uses `history: all`, which renders the first exchange and both participant messages in order (§7.1). `message_slot` lets `crisis_check` inspect the text that was actually sent, which `slot` alone cannot provide (VR-35). The trial's three `end` nodes differ only in `outcome`, and the caller binds it through `output_map` (VR-36); `state_isolation: isolated` means the trial's conversation scope does not extend to earlier trials. `build_assignment` is a pure function of `state.cells`, `state.reps`, and `session.seed`, and its result is written to state, so the realized order is auditable rather than re-derived (VR-33, §7.5).
+
 ---
 
 ## 11. Open Issues
@@ -1644,7 +1802,10 @@ Validation: passes VR-1…VR-32. `mdd_responses` names its sources explicitly, s
 - **Guard grammar finalization**: precedence edge cases and type-coercion corner cases. The standard function library is now specified (§5.5); this item is narrowed accordingly.
 - **Custom-node ABI**: full contract, sandboxing, capability negotiation, and whether to standardize on MCP as the transport adapter.
 - **Multi-await forks**: whether to ever permit concurrent blocking user turns (currently forbidden by P5/VR-11).
-- **Randomization breadth**: node-level `sample` is chosen for v1; revisit whether edge-level weights or deterministic assignment strategies (quota, A/B bucketing) are needed.
+- **Randomization breadth**: node-level `sample` is chosen for v1; revisit whether edge-level weights or deterministic assignment strategies (quota, A/B bucketing) are needed. Design assignment is now expressible with `session.seed` plus `shuffle`/`take`/`range` (§5.5, §10.9); whether a dedicated assignment primitive is warranted remains open.
+- **Permutation algorithm**: `shuffle` is property-based, so two conforming implementations MAY permute differently for the same seed (§5.5). Pinning a PRNG and algorithm would make assignments portable across implementations at the cost of freezing an algorithm in the spec. The realized assignment is written to state either way.
+- **History rendering**: `history.from` uses `{role, template}` entries rather than plain references, because plain references would need a serialization rule for every type (§7.1). Revisit if a canonical rendering is ever specified.
+- **Session reference set**: `session.*` exposes `seed`, `id`, `case_id`, and `role` (§3.1). Extend only when an instrument needs another scalar field.
 - **Streaming and partial responses**: token streaming, partial validation, and interruption semantics.
 - **Localization and rendering**: message catalogs, RTL, and channel-specific rendering of `ask` input types.
 - **Data sources**: connector taxonomy, schema drift, cache/consistency semantics, credential rotation, and row-level access control.
